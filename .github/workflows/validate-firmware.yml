@@ -1,0 +1,53 @@
+name: Validate firmware
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+  workflow_call:
+    inputs:
+      revision:
+        type: string
+        default: "1"
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Build and verify Mini, Mini v2 and Mini v2 Vib
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+
+      - name: Install Ruby
+        run: |
+          if ! command -v ruby >/dev/null; then
+            sudo apt-get update
+            sudo apt-get install -y ruby
+          fi
+
+      - name: Test HEX validation
+        run: python3 -m unittest discover -s tools -p 'test_*.py'
+
+      - name: Build all three targets
+        env:
+          JOBS: "4"
+        run: bash build.sh upstream
+
+      - name: Verify and package firmware
+        env:
+          REVISION: ${{ inputs.revision || '1' }}
+        run: python3 tools/package_firmware.py --checkout upstream --output dist --revision "$REVISION"
+
+      - name: Upload verified HEX, manifests and checksums
+        uses: actions/upload-artifact@v4
+        with:
+          name: myboxes-inav-firmware
+          path: dist/
+          if-no-files-found: error
+          retention-days: 14

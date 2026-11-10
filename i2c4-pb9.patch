@@ -1,0 +1,20 @@
+diff --git a/src/main/drivers/bus_i2c_hal.c b/src/main/drivers/bus_i2c_hal.c
+--- a/src/main/drivers/bus_i2c_hal.c
++++ b/src/main/drivers/bus_i2c_hal.c
+@@ -329,8 +329,15 @@ void i2cInit(I2CDevice device)
+     i2cUnstick(scl, sda);
+ 
+     // Init pins
++    uint8_t sdaAf = hardware->af;
++#if defined(STM32H7) && defined(USE_I2C_DEVICE_4)
++    // PB9 uses AF6 for I2C4 even when SCL uses AF4.
++    if (hardware->dev == I2C4 && hardware->sda == IO_TAG(PB9)) {
++        sdaAf = GPIO_AF6_I2C4;
++    }
++#endif
+     IOConfigGPIOAF(scl, IOCFG_I2C, hardware->af);
+-    IOConfigGPIOAF(sda, IOCFG_I2C, hardware->af);
++    IOConfigGPIOAF(sda, IOCFG_I2C, sdaAf);
+ 
+     // Init I2C peripheral
+     pHandle->Instance = hardware->dev;

@@ -1,0 +1,95 @@
+diff --git a/src/main/drivers/barometer/barometer_spl06.c b/src/main/drivers/barometer/barometer_spl06.c
+index 99870dc..5a4845c 100644
+--- a/src/main/drivers/barometer/barometer_spl06.c
++++ b/src/main/drivers/barometer/barometer_spl06.c
+@@ -31,7 +31,14 @@
+ 
+ #if defined(USE_BARO_SPL06)
+ 
+-// SPL06, address 0x76
++// Goermicro SPA06-003 has a different ID and three more calibration bytes.
++#ifdef SPL06_USE_SPA06
++#define BARO_CHIP_ID 0x11
++#define BARO_CALIB_COEFFS_LEN 21
++#else
++#define BARO_CHIP_ID SPL06_DEFAULT_CHIP_ID
++#define BARO_CALIB_COEFFS_LEN SPL06_CALIB_COEFFS_LEN
++#endif
+ 
+ typedef struct {
+     int16_t c0;
+@@ -43,6 +50,10 @@ typedef struct {
+     int16_t c20;
+     int16_t c21;
+     int16_t c30;
++#ifdef SPL06_USE_SPA06
++    int16_t c31;
++    int16_t c40;
++#endif
+ } spl06_coeffs_t;
+ 
+ 
+@@ -137,8 +148,14 @@ static float spl06_compensate_pressure(int32_t pressure_raw, int32_t temperature
+     const float p_raw_sc = (float)pressure_raw / spl06_raw_value_scale_factor(SPL06_PRESSURE_OVERSAMPLING);
+     const float t_raw_sc = (float)temperature_raw / spl06_raw_value_scale_factor(SPL06_TEMPERATURE_OVERSAMPLING);
+ 
+-    const float pressure_cal = (float)spl06_cal.c00 + p_raw_sc * ((float)spl06_cal.c10 + p_raw_sc * ((float)spl06_cal.c20 + p_raw_sc * spl06_cal.c30));
+-    const float p_temp_comp = t_raw_sc * ((float)spl06_cal.c01 + p_raw_sc * ((float)spl06_cal.c11 + p_raw_sc * spl06_cal.c21));
++    float pressure_cubic = spl06_cal.c30;
++    float temperature_quadratic = spl06_cal.c21;
++#ifdef SPL06_USE_SPA06
++    pressure_cubic += p_raw_sc * spl06_cal.c40;
++    temperature_quadratic += p_raw_sc * spl06_cal.c31;
++#endif
++    const float pressure_cal = (float)spl06_cal.c00 + p_raw_sc * ((float)spl06_cal.c10 + p_raw_sc * ((float)spl06_cal.c20 + p_raw_sc * pressure_cubic));
++    const float p_temp_comp = t_raw_sc * ((float)spl06_cal.c01 + p_raw_sc * ((float)spl06_cal.c11 + p_raw_sc * temperature_quadratic));
+ 
+     return pressure_cal + p_temp_comp;
+ }
+@@ -165,7 +182,7 @@ static bool deviceDetect(busDevice_t * busDev)
+     for (int retry = 0; retry < DETECTION_MAX_RETRY_COUNT; retry++) {
+         delay(100);
+         bool ack = busRead(busDev, SPL06_CHIP_ID_REG, &chipId);
+-        if (ack && chipId == SPL06_DEFAULT_CHIP_ID) {
++        if (ack && chipId == BARO_CHIP_ID) {
+             return true;
+         }
+     };
+@@ -178,9 +195,9 @@ static bool read_calibration_coefficients(baroDev_t *baro) {
+     if (!(busRead(baro->busDev, SPL06_MODE_AND_STATUS_REG, &sstatus) && (sstatus & SPL06_MEAS_CFG_COEFFS_RDY)))
+         return false;   // error reading status or coefficients not ready
+ 
+-    uint8_t caldata[SPL06_CALIB_COEFFS_LEN];
++    uint8_t caldata[BARO_CALIB_COEFFS_LEN];
+ 
+-    if (!busReadBuf(baro->busDev, SPL06_CALIB_COEFFS_START, (uint8_t *)&caldata, SPL06_CALIB_COEFFS_LEN)) {
++    if (!busReadBuf(baro->busDev, SPL06_CALIB_COEFFS_START, caldata, sizeof(caldata))) {
+         return false;
+     }
+ 
+@@ -193,6 +210,13 @@ static bool read_calibration_coefficients(baroDev_t *baro) {
+     spl06_cal.c20 = ((uint16_t)caldata[12] << 8) | (uint16_t)caldata[13];
+     spl06_cal.c21 = ((uint16_t)caldata[14] << 8) | (uint16_t)caldata[15];
+     spl06_cal.c30 = ((uint16_t)caldata[16] << 8) | (uint16_t)caldata[17];
++#ifdef SPL06_USE_SPA06
++    // The signed 12-bit c31 and c40 share register 0x23.
++    const int16_t c31 = (caldata[18] << 4) | (caldata[19] >> 4);
++    const int16_t c40 = ((caldata[19] & 0x0f) << 8) | caldata[20];
++    spl06_cal.c31 = (c31 ^ 0x800) - 0x800;
++    spl06_cal.c40 = (c40 ^ 0x800) - 0x800;
++#endif
+ 
+     return true;
+ }
+@@ -201,7 +225,10 @@ static bool spl06_configure_measurements(baroDev_t *baro)
+ {
+     uint8_t reg_value;
+ 
+-    reg_value = SPL06_TEMP_USE_EXT_SENSOR | spl06_samples_to_cfg_reg_value(SPL06_TEMPERATURE_OVERSAMPLING);
++    reg_value = spl06_samples_to_cfg_reg_value(SPL06_TEMPERATURE_OVERSAMPLING);
++#ifndef SPL06_USE_SPA06
++    reg_value |= SPL06_TEMP_USE_EXT_SENSOR;
++#endif
+     if (!busWrite(baro->busDev, SPL06_TEMPERATURE_CFG_REG, reg_value)) {
+         return false;
+     }

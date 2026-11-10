@@ -1,0 +1,65 @@
+name: Build MyboxH743 Mini INAV release
+run-name: INAV Mini, Mini v2 and Mini v2 Vib (r${{ inputs.revision }}-dev)
+
+on:
+  workflow_dispatch:
+    inputs:
+      revision:
+        description: "Positive MYBOXES release revision. These images are bench prereleases."
+        required: true
+        default: "1"
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: myboxes-inav-release
+  cancel-in-progress: false
+
+jobs:
+  build:
+    if: github.ref == 'refs/heads/main'
+    uses: ./.github/workflows/validate-firmware.yml
+    with:
+      revision: ${{ inputs.revision }}
+
+  release:
+    name: Publish the three verified prereleases
+    needs: build
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: myboxes-inav-firmware
+          path: dist
+
+      - name: Validate the release assets and reserve the version
+        run: |
+          for directory in dist/mini dist/mini-v2 dist/mini-v2-vib; do
+            (cd "$directory" && sha256sum --check SHA256SUMS.txt)
+            tag=$(jq -er .release "$directory/manifest.json")
+            if gh release view "$tag" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+              echo "Release $tag already exists. Increase the revision." >&2
+              exit 1
+            fi
+          done
+
+      - name: Publish to GitHub Releases
+        run: |
+          for directory in dist/mini dist/mini-v2 dist/mini-v2-vib; do
+            manifest="$directory/manifest.json"
+            tag=$(jq -er .release "$manifest")
+            title=$(jq -er '.board_name + " INAV " + .version + " r" + (.revision | tostring) + "-dev"' "$manifest")
+            firmware=$(jq -er '.files[0].name' "$manifest")
+            notes="Стендовая сборка MYBOX H743 Mini. PWM, USB DFU и локальный HEX в INAV Configurator 9.1."
+            if [[ "$directory" == dist/mini-v2-vib ]]; then
+              notes="$notes Используется основной ICM-45686. Датчики выносного модуля отключены."
+            fi
+            gh release create "$tag" "$directory/$firmware" "$manifest" "$directory/SHA256SUMS.txt" \
+              --repo "$GITHUB_REPOSITORY" --target "$GITHUB_SHA" --title "$title" --prerelease --notes "$notes"
+          done
