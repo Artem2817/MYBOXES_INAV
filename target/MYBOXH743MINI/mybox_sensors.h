@@ -13,6 +13,10 @@ typedef struct {
 
 PG_DECLARE(myboxSensorConfig_t, myboxSensorConfig);
 
+#ifdef USE_MYBOX_VIB
+int8_t myboxActiveBarometerIndex(void);
+#endif
+
 void myboxSensorsInit(void);
 void myboxSensorsUpdate(void);
 bool myboxImuSample(uint8_t index, int16_t *temperatureDeciC);

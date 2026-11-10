@@ -3,6 +3,8 @@
 
 #ifdef USE_MYBOX_V2_SENSORS
 #include "mybox_sensors.h"
+#include "mybox_rcin.h"
+#include "mybox_sbus_pulse.h"
 #include "common/maths.h"
 #include "config/parameter_group_ids.h"
 #include "drivers/accgyro/accgyro_icm42670.h"
@@ -15,13 +17,13 @@
 PG_REGISTER_WITH_RESET_TEMPLATE(myboxSensorConfig_t, myboxSensorConfig, PG_MYBOX_SENSOR_CONFIG, 0);
 PG_RESET_TEMPLATE(myboxSensorConfig_t, myboxSensorConfig,
     .heaterTargetC = SETTING_MYBOX_HEATER_TARGET_DEFAULT,
-    .barometerIndex = 0,
+#ifdef USE_MYBOX_VIB
+    .barometerIndex = SETTING_MYBOX_BARO_TO_USE_DEFAULT,
+#endif
 );
 
 enum {
-    HEATER_PERIOD = 10000,
-    HEATER_TIMER_HZ = 10000,
-    HEATER_MAX_DUTY = HEATER_PERIOD / 5,
+    HEATER_MAX_DUTY = MYBOX_TIM2_PERIOD / 5,
     HEATER_MAX_TEMP_DECIC = 500,
     HEATER_MIN_TEMP_DECIC = -400,
     ICM45686_ID_REGISTER = 0x72,
@@ -54,7 +56,7 @@ static bool myboxImuResponds(uint8_t index)
 void myboxSensorsInit(void)
 {
 #ifdef USE_MYBOX_VIB
-    activeImu = gyroConfig()->gyro_to_use;
+    activeImu = myboxActiveImuIndex();
     const uint8_t standbyImu = activeImu == 1 ? 0 : 1;
     standbyGyro.imuSensorToUse = standbyImu;
     standbyAcc.imuSensorToUse = standbyImu;
@@ -71,7 +73,7 @@ void myboxSensorsInit(void)
 #endif
     TCH_t *heater = timerGetTCH(&heaterHardware);
     if (heater) {
-        timerConfigBase(heater, HEATER_PERIOD, HEATER_TIMER_HZ);
+        myboxConfigureTimer2(heater);
         timerPWMConfigChannel(heater, 0);
         timerPWMStart(heater);
         timerEnable(heater);
@@ -118,7 +120,7 @@ void myboxSensorsUpdate(void)
     if (target > 0 && target <= 45 && imuValid[heatedImu]
         && temperature >= HEATER_MIN_TEMP_DECIC && temperature < HEATER_MAX_TEMP_DECIC) {
         const int error = target * 10 - temperature;
-        duty = constrain(error * 100, 0, HEATER_MAX_DUTY);
+        duty = constrain(error * (HEATER_MAX_DUTY / 20), 0, HEATER_MAX_DUTY);
     }
     *heaterCompare = duty;
 }

@@ -11,16 +11,17 @@ index c243d92..c56258d 100755
      drivers/accgyro/accgyro_icm45686.c
      drivers/accgyro/accgyro_icm45686.h
 diff --git a/src/main/config/parameter_group_ids.h b/src/main/config/parameter_group_ids.h
-index 2acb9c8..fa55533 100644
+index 2acb9c8..3afc70f 100644
 --- a/src/main/config/parameter_group_ids.h
 +++ b/src/main/config/parameter_group_ids.h
-@@ -132,7 +132,8 @@
+@@ -132,7 +132,9 @@
  #define PG_GEOZONE_CONFIG 1042
  #define PG_GEOZONES 1043
  #define PG_GEOZONE_VERTICES 1044
 -#define PG_INAV_END PG_GEOZONE_VERTICES
 +#define PG_MYBOX_SENSOR_CONFIG 1045
-+#define PG_INAV_END PG_MYBOX_SENSOR_CONFIG
++#define PG_MYBOX_RCIN_CONFIG 1046
++#define PG_INAV_END PG_MYBOX_RCIN_CONFIG
  
  // OSD configuration (subject to change)
  //#define PG_OSD_FONT_CONFIG 2047
@@ -212,7 +213,7 @@ index 385fbd3..f5caa85 100644
  
  typedef enum {
 diff --git a/src/main/fc/cli.c b/src/main/fc/cli.c
-index 9bb2c77..ecf2f47 100644
+index 9bb2c77..ea2137c 100644
 --- a/src/main/fc/cli.c
 +++ b/src/main/fc/cli.c
 @@ -24,6 +24,9 @@
@@ -234,12 +235,15 @@ index 9bb2c77..ecf2f47 100644
  
  // sync this with sensors_e
  static const char * const sensorTypeNames[] = {
-@@ -4144,6 +4147,23 @@ static void cliStatus(char *cmdline)
+@@ -4144,6 +4147,26 @@ static void cliStatus(char *cmdline)
  #endif // for if at32
  #endif // for SITL
  
 +#ifdef USE_MYBOX_VIB
-+    cliPrintLinef("MYBOX active IMU: %d", gyroConfig()->gyro_to_use);
++    cliPrintLinef("MYBOX active IMU: %d (preferred %d)",
++        sensors(SENSOR_GYRO) ? myboxActiveImuIndex() : -1, gyroConfig()->gyro_to_use);
++    cliPrintLinef("MYBOX active barometer: %d (preferred %d)",
++        myboxActiveBarometerIndex(), myboxSensorConfig()->barometerIndex);
 +    for (uint8_t index = 0; index < 2; ++index) {
 +        int16_t temperature;
 +        int32_t pressure;
@@ -319,7 +323,7 @@ index 4ca125d..1e854c0 100755
  }
  #endif
 diff --git a/src/main/fc/settings.yaml b/src/main/fc/settings.yaml
-index 4e8affb..210a00d 100644
+index 4e8affb..1d9b64f 100644
 --- a/src/main/fc/settings.yaml
 +++ b/src/main/fc/settings.yaml
 @@ -2,7 +2,7 @@ tables:
@@ -331,10 +335,21 @@ index 4e8affb..210a00d 100644
      enum: accelerationSensor_e
    - name: rangefinder_hardware
      values: ["NONE", "SRF10", "VL53L0X", "MSP", "BENEWAKE", "VL53L1X", "US42", "TOF10120_I2C", "FAKE", "TERARANGER_EVO", "USD1_V0", "NRA"]
-@@ -858,6 +858,25 @@ groups:
+@@ -858,6 +858,36 @@ groups:
          max: 255
          default_value: 14
  
++  - name: PG_MYBOX_RCIN_CONFIG
++    condition: USE_MYBOX_RCIN
++    type: myboxRcinConfig_t
++    headers: ["mybox_rcin.h"]
++    members:
++      - name: mybox_sbus_rcin
++        description: "Receive SBUS on the dedicated MYBOX RCIN contact."
++        field: sbusEnabled
++        default_value: "OFF"
++        table: off_on
++
 +  - name: PG_MYBOX_SENSOR_CONFIG
 +    condition: USE_MYBOX_V2_SENSORS
 +    type: myboxSensorConfig_t
@@ -350,15 +365,43 @@ index 4e8affb..210a00d 100644
 +        description: "Preferred barometer. 0 is the main board, 1 is the J19 module."
 +        condition: USE_MYBOX_VIB
 +        field: barometerIndex
-+        default_value: 0
++        default_value: 1
 +        min: 0
 +        max: 1
 +
    - name: PG_FAILSAFE_CONFIG
      type: failsafeConfig_t
      headers: ["flight/failsafe.h"]
+diff --git a/src/main/rx/sbus.c b/src/main/rx/sbus.c
+index f08267e..d951ad3 100644
+--- a/src/main/rx/sbus.c
++++ b/src/main/rx/sbus.c
+@@ -40,6 +40,10 @@
+ #include "rx/sbus.h"
+ #include "rx/sbus_channels.h"
+ 
++#ifdef USE_MYBOX_RCIN
++#include "mybox_rcin.h"
++#endif
++
+ /*
+  * Observations
+  *
+@@ -238,6 +242,12 @@ static bool sbusInitEx(const rxConfig_t *rxConfig, rxRuntimeConfig_t *rxRuntimeC
+ 
+     rxRuntimeConfig->rcFrameStatusFn = sbusFrameStatus;
+ 
++#ifdef USE_MYBOX_RCIN
++    if (rxConfig->serialrx_provider == SERIALRX_SBUS && myboxRcinConfig()->sbusEnabled) {
++        return myboxRcinSbusInit(sbusDataReceive, &sbusFrameData, !rxConfig->serialrx_inverted);
++    }
++#endif
++
+     const serialPortConfig_t *portConfig = findSerialPortConfig(FUNCTION_RX_SERIAL);
+     if (!portConfig) {
+         return false;
 diff --git a/src/main/sensors/acceleration.c b/src/main/sensors/acceleration.c
-index cc52be6..d99cbd0 100644
+index cc52be6..50e699e 100644
 --- a/src/main/sensors/acceleration.c
 +++ b/src/main/sensors/acceleration.c
 @@ -46,6 +46,7 @@
@@ -369,7 +412,43 @@ index cc52be6..d99cbd0 100644
  #include "drivers/accgyro/accgyro_lsm6dxx.h"
  #include "drivers/accgyro/accgyro_fake.h"
  #include "drivers/sensor.h"
-@@ -260,6 +261,17 @@ static bool accDetect(accDev_t *dev, accelerationSensor_e accHardwareToUse)
+@@ -86,7 +87,11 @@ static EXTENDED_FASTRAM void *accNotchFilter[XYZ_AXIS_COUNT];
+ static EXTENDED_FASTRAM float fAccZero[XYZ_AXIS_COUNT];
+ static EXTENDED_FASTRAM float fAccGain[XYZ_AXIS_COUNT];
+ 
++#ifdef USE_MYBOX_VIB
++PG_REGISTER_WITH_RESET_FN(accelerometerConfig_t, accelerometerConfig, PG_ACCELEROMETER_CONFIG, 7);
++#else
+ PG_REGISTER_WITH_RESET_FN(accelerometerConfig_t, accelerometerConfig, PG_ACCELEROMETER_CONFIG, 6);
++#endif
+ 
+ void pgResetFn_accelerometerConfig(accelerometerConfig_t *instance)
+ {
+@@ -110,7 +115,23 @@ void pgResetFn_accelerometerConfig(accelerometerConfig_t *instance)
+     );
+ }
+ 
++#ifdef USE_MYBOX_VIB
++static bool accCalibrationMatchesImu(void)
++{
++    return accelerometerConfig()->calibrationImu == myboxActiveImuIndex() + 1;
++}
++#endif
++
+ static void updateAccCoefficients(void) {
++#ifdef USE_MYBOX_VIB
++    if (!accCalibrationMatchesImu()) {
++        for (unsigned axis = 0; axis < XYZ_AXIS_COUNT; axis++) {
++            fAccZero[axis] = 0.0f;
++            fAccGain[axis] = 1.0f;
++        }
++        return;
++    }
++#endif
+ 
+     for (uint8_t i = 0; i < XYZ_AXIS_COUNT; i++) {
+         //Float zero
+@@ -260,6 +281,17 @@ static bool accDetect(accDev_t *dev, accelerationSensor_e accHardwareToUse)
          }
          FALLTHROUGH;
  #endif
@@ -387,8 +466,52 @@ index cc52be6..d99cbd0 100644
  #ifdef USE_IMU_FAKE
      case ACC_FAKE:
          if (fakeAccDetect(dev)) {
+@@ -293,7 +325,9 @@ bool accInit(uint32_t targetLooptime)
+     memset(&acc, 0, sizeof(acc));
+ 
+     // Set inertial sensor tag (for dual-gyro selection)
+-#ifdef USE_DUAL_GYRO
++#if defined(USE_MYBOX_VIB)
++    acc.dev.imuSensorToUse = myboxActiveImuIndex();
++#elif defined(USE_DUAL_GYRO)
+     acc.dev.imuSensorToUse = gyroConfig()->gyro_to_use;     // Use the same selection from gyroConfig()
+ #else
+     acc.dev.imuSensorToUse = 0;
+@@ -308,6 +342,9 @@ bool accInit(uint32_t targetLooptime)
+     acc.accTargetLooptime = targetLooptime;
+     acc.accClipCount = 0;
+     accInitFilters();
++#ifdef USE_MYBOX_VIB
++    accSetCalibrationValues();
++#endif
+     updateAccCoefficients();
+ 
+     for (int axis = 0; axis < XYZ_AXIS_COUNT; axis++) {
+@@ -505,6 +542,9 @@ static void performAcclerationCalibration(void)
+         else {
+             // saveConfigAndNotify will trigger eepromREAD and in turn call back the accelerometer gain validation
+             // that will set ENABLE_STATE(ACCELEROMETER_CALIBRATED) if all is good
++#ifdef USE_MYBOX_VIB
++            accelerometerConfigMutable()->calibrationImu = myboxActiveImuIndex() + 1;
++#endif
+             saveConfigAndNotify();
+             //Recompute all coeffs
+             updateAccCoefficients();
+@@ -651,6 +691,12 @@ bool accIsClipped(void)
+ 
+ void accSetCalibrationValues(void)
+ {
++#ifdef USE_MYBOX_VIB
++    if (!accCalibrationMatchesImu()) {
++        DISABLE_STATE(ACCELEROMETER_CALIBRATED);
++        return;
++    }
++#endif
+     if (!ARMING_FLAG(SIMULATOR_MODE_SITL) &&
+         ((accelerometerConfig()->accZero.raw[X] == 0) && (accelerometerConfig()->accZero.raw[Y] == 0) && (accelerometerConfig()->accZero.raw[Z] == 0) &&
+         (accelerometerConfig()->accGain.raw[X] == 4096) && (accelerometerConfig()->accGain.raw[Y] == 4096) &&(accelerometerConfig()->accGain.raw[Z] == 4096))) {
 diff --git a/src/main/sensors/acceleration.h b/src/main/sensors/acceleration.h
-index ea76b63..10eefbd 100644
+index ea76b63..a23c63d 100644
 --- a/src/main/sensors/acceleration.h
 +++ b/src/main/sensors/acceleration.h
 @@ -46,7 +46,8 @@ typedef enum {
@@ -401,8 +524,20 @@ index ea76b63..10eefbd 100644
  } accelerationSensor_e;
  
  typedef struct {
+@@ -72,7 +73,10 @@ typedef struct accelerometerConfig_s {
+     uint8_t acc_hardware;                   // Which acc hardware to use on boards with more than one device
+     uint16_t acc_lpf_hz;                    // cutoff frequency for the low pass filter used on the acc z-axis for althold in Hz
+     flightDynamicsTrims_t accZero;          // Accelerometer offset
+-    flightDynamicsTrims_t accGain;          // Accelerometer gain to read exactly 1G
++    flightDynamicsTrims_t accGain;
++#ifdef USE_MYBOX_VIB
++    uint8_t calibrationImu; // Sensor index plus one, or zero before calibration.
++#endif          // Accelerometer gain to read exactly 1G
+     uint8_t acc_notch_hz;                   // Accelerometer notch filter frequency
+     uint8_t acc_notch_cutoff;               // Accelerometer notch filter cutoff frequency
+     uint8_t acc_soft_lpf_type;              // Accelerometer LPF type
 diff --git a/src/main/sensors/barometer.c b/src/main/sensors/barometer.c
-index a9c2d84..3748d47 100644
+index a9c2d84..35b3ee8 100644
 --- a/src/main/sensors/barometer.c
 +++ b/src/main/sensors/barometer.c
 @@ -49,6 +49,9 @@
@@ -415,7 +550,7 @@ index a9c2d84..3748d47 100644
  
  #ifdef USE_HARDWARE_REVISION_DETECTION
  #include "hardware_revision.h"
-@@ -238,12 +241,82 @@ bool baroDetect(baroDev_t *dev, baroSensor_e baroHardwareToUse)
+@@ -238,12 +241,90 @@ bool baroDetect(baroDev_t *dev, baroSensor_e baroHardwareToUse)
      return true;
  }
  
@@ -431,6 +566,14 @@ index a9c2d84..3748d47 100644
 +
 +static myboxPressureSample_t selectedBaroSample;
 +#ifdef USE_MYBOX_VIB
++int8_t myboxActiveBarometerIndex(void)
++{
++    if (detectedSensors[SENSOR_INDEX_BARO] != BARO_SPL06) {
++        return -1;
++    }
++    return baro.dev.busDev->descriptorPtr->tag;
++}
++
 +static myboxPressureSample_t secondaryBaroSample;
 +static baroDev_t secondaryBaro;
 +static bool secondaryBaroPresent;
@@ -501,7 +644,7 @@ index a9c2d84..3748d47 100644
  }
  
  typedef enum {
-@@ -261,6 +334,33 @@ uint32_t baroUpdate(void)
+@@ -261,6 +342,33 @@ uint32_t baroUpdate(void)
      }
  #endif
  
@@ -535,7 +678,7 @@ index a9c2d84..3748d47 100644
      switch (state) {
          default:
          case BAROMETER_NEEDS_SAMPLES:
-@@ -344,6 +444,11 @@ int16_t baroGetTemperature(void)
+@@ -344,6 +452,11 @@ int16_t baroGetTemperature(void)
  
  bool baroIsHealthy(void)
  {
@@ -548,7 +691,7 @@ index a9c2d84..3748d47 100644
  }
  
 diff --git a/src/main/sensors/gyro.c b/src/main/sensors/gyro.c
-index 8544b45..999d2a4 100644
+index 8544b45..85f2fe1 100644
 --- a/src/main/sensors/gyro.c
 +++ b/src/main/sensors/gyro.c
 @@ -48,6 +48,7 @@
@@ -559,7 +702,7 @@ index 8544b45..999d2a4 100644
  #include "drivers/accgyro/accgyro_lsm6dxx.h"
  #include "drivers/accgyro/accgyro_fake.h"
  #include "drivers/io.h"
-@@ -100,7 +101,11 @@ EXTENDED_FASTRAM secondaryDynamicGyroNotchState_t secondaryDynamicGyroNotchState
+@@ -100,13 +101,21 @@ EXTENDED_FASTRAM secondaryDynamicGyroNotchState_t secondaryDynamicGyroNotchState
  
  #endif
  
@@ -571,7 +714,17 @@ index 8544b45..999d2a4 100644
  
  PG_RESET_TEMPLATE(gyroConfig_t, gyroConfig,
      .gyro_anti_aliasing_lpf_hz = SETTING_GYRO_ANTI_ALIASING_LPF_HZ_DEFAULT,
-@@ -238,6 +243,15 @@ STATIC_UNIT_TESTED gyroSensor_e gyroDetect(gyroDev_t *dev, gyroSensor_e gyroHard
+     .looptime = SETTING_LOOPTIME_DEFAULT,
+ #ifdef USE_DUAL_GYRO
++#ifdef USE_MYBOX_VIB
++    .gyro_to_use = 1,
++#else
+     .gyro_to_use = SETTING_GYRO_TO_USE_DEFAULT,
++#endif
+ #endif
+     .gyro_main_lpf_hz = SETTING_GYRO_MAIN_LPF_HZ_DEFAULT,
+     .gyroDynamicLpfMinHz = SETTING_GYRO_DYN_LPF_MIN_HZ_DEFAULT,
+@@ -238,6 +247,15 @@ STATIC_UNIT_TESTED gyroSensor_e gyroDetect(gyroDev_t *dev, gyroSensor_e gyroHard
          FALLTHROUGH;
  #endif
  
@@ -587,8 +740,48 @@ index 8544b45..999d2a4 100644
  #ifdef USE_IMU_FAKE
      case GYRO_FAKE:
          if (fakeGyroDetect(dev)) {
+@@ -306,13 +324,25 @@ bool gyroInit(void)
+ 
+     // Set inertial sensor tag (for dual-gyro selection)
+ #ifdef USE_DUAL_GYRO
++#ifdef USE_MYBOX_VIB
++    gyroDev[0].imuSensorToUse = gyroConfig()->gyro_to_use == 0 ? 0 : 1;
++#else
+     gyroDev[0].imuSensorToUse = gyroConfig()->gyro_to_use;
++#endif
+ #else
+     gyroDev[0].imuSensorToUse = 0;
+ #endif
+ 
+     // Detecting gyro0
+     gyroSensor_e gyroHardware = gyroDetect(&gyroDev[0], GYRO_AUTODETECT);
++#ifdef USE_MYBOX_VIB
++    if (gyroHardware == GYRO_NONE) {
++        const uint8_t fallback = gyroDev[0].imuSensorToUse == 1 ? 0 : 1;
++        memset(&gyroDev[0], 0, sizeof(gyroDev[0]));
++        gyroDev[0].imuSensorToUse = fallback;
++        gyroHardware = gyroDetect(&gyroDev[0], GYRO_AUTODETECT);
++    }
++#endif
+     if (gyroHardware == GYRO_NONE) {
+         gyro.initialized = false;
+         detectedSensors[SENSOR_INDEX_GYRO] = GYRO_NONE;
+@@ -350,6 +380,13 @@ bool gyroInit(void)
+     return true;
+ }
+ 
++#ifdef USE_MYBOX_VIB
++uint8_t myboxActiveImuIndex(void)
++{
++    return gyroDev[0].imuSensorToUse;
++}
++#endif
++
+ void gyroStartCalibration(void)
+ {
+     if (!gyro.initialized) {
 diff --git a/src/main/sensors/gyro.h b/src/main/sensors/gyro.h
-index 18fe5d9..1af823c 100644
+index 18fe5d9..d7bcdb3 100644
 --- a/src/main/sensors/gyro.h
 +++ b/src/main/sensors/gyro.h
 @@ -44,7 +44,8 @@ typedef enum {
@@ -601,3 +794,14 @@ index 18fe5d9..1af823c 100644
  } gyroSensor_e;
  
  typedef enum {
+@@ -111,6 +112,10 @@ typedef struct gyroConfig_s {
+ PG_DECLARE(gyroConfig_t, gyroConfig);
+ 
+ bool gyroInit(void);
++#ifdef USE_MYBOX_VIB
++uint8_t myboxActiveImuIndex(void);
++#endif
++
+ void gyroGetMeasuredRotationRate(fpVector3_t *imuMeasuredRotationBF);
+ void gyroUpdate(void);
+ void gyroFilter(void);

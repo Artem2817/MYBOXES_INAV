@@ -15,6 +15,7 @@
 #endif
 
 #define USE_TARGET_CONFIG
+#define USE_MYBOX_RCIN
 #define LED0                    PE4
 #define LED0_INVERTED
 #define USE_HARDWARE_PREBOOT_SETUP
