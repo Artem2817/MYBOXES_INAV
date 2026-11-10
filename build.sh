@@ -39,7 +39,7 @@ else
     cp -R -- "$overlay_dir/target/MYBOXH743MINI" "$target_dir"
 fi
 
-for patch in "$overlay_dir/spa06-003.patch" "$overlay_dir/i2c4-pb9.patch"; do
+for patch in "$overlay_dir/spa06-003.patch" "$overlay_dir/i2c4-pb9.patch" "$overlay_dir/vib-sensors.patch"; do
     if ! git -C "$checkout" apply --reverse --check "$patch" 2>/dev/null; then
         git -C "$checkout" apply "$patch"
     fi

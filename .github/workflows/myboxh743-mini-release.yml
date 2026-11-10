@@ -58,7 +58,7 @@ jobs:
             firmware=$(jq -er '.files[0].name' "$manifest")
             notes="Стендовая сборка MYBOX H743 Mini. PWM, USB DFU и локальный HEX в INAV Configurator 9.1."
             if [[ "$directory" == dist/mini-v2-vib ]]; then
-              notes="$notes Используется основной ICM-45686. Датчики выносного модуля отключены."
+              notes="$notes Оба IMU и оба SPA06-003 доступны для проверки. Управление по умолчанию использует основной ICM-45686. Ориентация выносного ICM-42670-P временная."
             fi
             gh release create "$tag" "$directory/$firmware" "$manifest" "$directory/SHA256SUMS.txt" \
               --repo "$GITHUB_REPOSITORY" --target "$GITHUB_SHA" --title "$title" --prerelease --notes "$notes"

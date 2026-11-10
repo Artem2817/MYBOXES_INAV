@@ -14,6 +14,7 @@
 #error Unknown MYBOX H743 Mini target
 #endif
 
+#define USE_TARGET_CONFIG
 #define LED0                    PE4
 #define LED0_INVERTED
 #define USE_HARDWARE_PREBOOT_SETUP
@@ -111,6 +112,17 @@
 #define SPI2_MISO_PIN           PC2
 #define SPI2_MOSI_PIN           PC3
 #define USE_IMU_ICM45686
+#define USE_MYBOX_V2_SENSORS
+#if defined(MYBOXH743MINIV2VIB_BENCH)
+#define USE_MYBOX_VIB
+#define USE_DUAL_GYRO
+#define USE_IMU_ICM42670
+#define USE_SPI_DEVICE_1
+#define SPI1_SCK_PIN            PA5
+#define SPI1_MISO_PIN           PA6
+#define SPI1_MOSI_PIN           PA7
+#define MYBOX_MODULE_IMU_ALIGN  CW0_DEG // Temporary until the J19 module is aligned.
+#endif
 #define ICM45686_SPI_BUS        BUS_SPI2
 #define ICM45686_CS_PIN         PB12
 #define IMU_ICM45686_ALIGN      CW0_DEG

@@ -1,5 +1,5 @@
 diff --git a/src/main/drivers/barometer/barometer_spl06.c b/src/main/drivers/barometer/barometer_spl06.c
-index 99870dc..5a4845c 100644
+index 99870dc..8f492d2 100644
 --- a/src/main/drivers/barometer/barometer_spl06.c
 +++ b/src/main/drivers/barometer/barometer_spl06.c
 @@ -31,7 +31,14 @@
@@ -18,7 +18,7 @@ index 99870dc..5a4845c 100644
  
  typedef struct {
      int16_t c0;
-@@ -43,6 +50,10 @@ typedef struct {
+@@ -43,13 +50,29 @@ typedef struct {
      int16_t c20;
      int16_t c21;
      int16_t c30;
@@ -29,24 +29,127 @@ index 99870dc..5a4845c 100644
  } spl06_coeffs_t;
  
  
-@@ -137,8 +148,14 @@ static float spl06_compensate_pressure(int32_t pressure_raw, int32_t temperature
-     const float p_raw_sc = (float)pressure_raw / spl06_raw_value_scale_factor(SPL06_PRESSURE_OVERSAMPLING);
-     const float t_raw_sc = (float)temperature_raw / spl06_raw_value_scale_factor(SPL06_TEMPERATURE_OVERSAMPLING);
+-spl06_coeffs_t spl06_cal;
+-// uncompensated pressure and temperature
+-static int32_t spl06_pressure_raw = 0;
+-static int32_t spl06_temperature_raw = 0;
++typedef struct {
++    spl06_coeffs_t cal;
++    int32_t pressureRaw;
++    int32_t temperatureRaw;
++} spl06State_t;
++
++#ifdef USE_MYBOX_VIB
++static spl06State_t spl06State[2];
++#else
++static spl06State_t spl06State[1];
++#endif
++
++static spl06State_t *spl06GetState(const baroDev_t *baro)
++{
++    return &spl06State[baro->busDev->descriptorPtr->tag];
++}
  
+ static int8_t spl06_samples_to_cfg_reg_value(uint8_t sample_rate)
+ {
+@@ -90,6 +113,12 @@ static bool spl06_start_temperature_measurement(baroDev_t * baro)
+ 
+ static bool spl06_read_temperature(baroDev_t * baro)
+ {
++#ifdef SPL06_USE_SPA06
++    uint8_t status;
++    if (!busRead(baro->busDev, SPL06_MODE_AND_STATUS_REG, &status) || !(status & SPL06_MEAS_CFG_TEMPERATURE_RDY)) {
++        return false;
++    }
++#endif
+     uint8_t data[SPL06_TEMPERATURE_LEN];
+     int32_t spl06_temperature;
+ 
+@@ -97,7 +126,7 @@ static bool spl06_read_temperature(baroDev_t * baro)
+ 
+     if (ack) {
+         spl06_temperature = (int32_t)((data[0] & 0x80 ? 0xFF000000 : 0) | (((uint32_t)(data[0])) << 16) | (((uint32_t)(data[1])) << 8) | ((uint32_t)data[2]));
+-        spl06_temperature_raw = spl06_temperature;
++        spl06GetState(baro)->temperatureRaw = spl06_temperature;
+     }
+ 
+     return ack;
+@@ -110,6 +139,12 @@ static bool spl06_start_pressure_measurement(baroDev_t * baro)
+ 
+ static bool spl06_read_pressure(baroDev_t * baro)
+ {
++#ifdef SPL06_USE_SPA06
++    uint8_t status;
++    if (!busRead(baro->busDev, SPL06_MODE_AND_STATUS_REG, &status) || !(status & SPL06_MEAS_CFG_PRESSURE_RDY)) {
++        return false;
++    }
++#endif
+     uint8_t data[SPL06_PRESSURE_LEN];
+     int32_t spl06_pressure;
+ 
+@@ -117,42 +152,47 @@ static bool spl06_read_pressure(baroDev_t * baro)
+ 
+     if (ack) {
+         spl06_pressure = (int32_t)((data[0] & 0x80 ? 0xFF000000 : 0) | (((uint32_t)(data[0])) << 16) | (((uint32_t)(data[1])) << 8) | ((uint32_t)data[2]));
+-        spl06_pressure_raw = spl06_pressure;
++        spl06GetState(baro)->pressureRaw = spl06_pressure;
+     }
+ 
+     return ack;
+ }
+ 
+ // Returns temperature in degrees centigrade
+-static float spl06_compensate_temperature(int32_t temperature_raw)
++static float spl06_compensate_temperature(const spl06State_t *state)
+ {
+-    const float t_raw_sc = (float)temperature_raw / spl06_raw_value_scale_factor(SPL06_TEMPERATURE_OVERSAMPLING);
+-    const float temp_comp = (float)spl06_cal.c0 / 2 + t_raw_sc * spl06_cal.c1;
++    const float t_raw_sc = (float)state->temperatureRaw / spl06_raw_value_scale_factor(SPL06_TEMPERATURE_OVERSAMPLING);
++    const float temp_comp = (float)state->cal.c0 / 2 + t_raw_sc * state->cal.c1;
+     return temp_comp;
+ }
+ 
+ // Returns pressure in Pascal
+-static float spl06_compensate_pressure(int32_t pressure_raw, int32_t temperature_raw)
++static float spl06_compensate_pressure(const spl06State_t *state)
+ {
+-    const float p_raw_sc = (float)pressure_raw / spl06_raw_value_scale_factor(SPL06_PRESSURE_OVERSAMPLING);
+-    const float t_raw_sc = (float)temperature_raw / spl06_raw_value_scale_factor(SPL06_TEMPERATURE_OVERSAMPLING);
+-
 -    const float pressure_cal = (float)spl06_cal.c00 + p_raw_sc * ((float)spl06_cal.c10 + p_raw_sc * ((float)spl06_cal.c20 + p_raw_sc * spl06_cal.c30));
 -    const float p_temp_comp = t_raw_sc * ((float)spl06_cal.c01 + p_raw_sc * ((float)spl06_cal.c11 + p_raw_sc * spl06_cal.c21));
-+    float pressure_cubic = spl06_cal.c30;
-+    float temperature_quadratic = spl06_cal.c21;
++    const float p_raw_sc = (float)state->pressureRaw / spl06_raw_value_scale_factor(SPL06_PRESSURE_OVERSAMPLING);
++    const float t_raw_sc = (float)state->temperatureRaw / spl06_raw_value_scale_factor(SPL06_TEMPERATURE_OVERSAMPLING);
++
++    float pressure_cubic = state->cal.c30;
++    float temperature_quadratic = state->cal.c21;
 +#ifdef SPL06_USE_SPA06
-+    pressure_cubic += p_raw_sc * spl06_cal.c40;
-+    temperature_quadratic += p_raw_sc * spl06_cal.c31;
++    pressure_cubic += p_raw_sc * state->cal.c40;
++    temperature_quadratic += p_raw_sc * state->cal.c31;
 +#endif
-+    const float pressure_cal = (float)spl06_cal.c00 + p_raw_sc * ((float)spl06_cal.c10 + p_raw_sc * ((float)spl06_cal.c20 + p_raw_sc * pressure_cubic));
-+    const float p_temp_comp = t_raw_sc * ((float)spl06_cal.c01 + p_raw_sc * ((float)spl06_cal.c11 + p_raw_sc * temperature_quadratic));
++    const float pressure_cal = (float)state->cal.c00 + p_raw_sc * ((float)state->cal.c10 + p_raw_sc * ((float)state->cal.c20 + p_raw_sc * pressure_cubic));
++    const float p_temp_comp = t_raw_sc * ((float)state->cal.c01 + p_raw_sc * ((float)state->cal.c11 + p_raw_sc * temperature_quadratic));
  
      return pressure_cal + p_temp_comp;
  }
-@@ -165,7 +182,7 @@ static bool deviceDetect(busDevice_t * busDev)
+ 
+ bool spl06_calculate(baroDev_t * baro, int32_t * pressure, int32_t * temperature)
+ {
+-    UNUSED(baro);
+-
++    const spl06State_t *state = spl06GetState(baro);
+     if (pressure) {
+-        *pressure = lrintf(spl06_compensate_pressure(spl06_pressure_raw, spl06_temperature_raw));
++        *pressure = lrintf(spl06_compensate_pressure(state));
+     }
+ 
+     if (temperature) {
+-        *temperature = lrintf(spl06_compensate_temperature(spl06_temperature_raw) * 100);
++        *temperature = lrintf(spl06_compensate_temperature(state) * 100);
+     }
+ 
+     return true;
+@@ -165,7 +205,7 @@ static bool deviceDetect(busDevice_t * busDev)
      for (int retry = 0; retry < DETECTION_MAX_RETRY_COUNT; retry++) {
          delay(100);
          bool ack = busRead(busDev, SPL06_CHIP_ID_REG, &chipId);
@@ -55,7 +158,7 @@ index 99870dc..5a4845c 100644
              return true;
          }
      };
-@@ -178,9 +195,9 @@ static bool read_calibration_coefficients(baroDev_t *baro) {
+@@ -178,21 +218,29 @@ static bool read_calibration_coefficients(baroDev_t *baro) {
      if (!(busRead(baro->busDev, SPL06_MODE_AND_STATUS_REG, &sstatus) && (sstatus & SPL06_MEAS_CFG_COEFFS_RDY)))
          return false;   // error reading status or coefficients not ready
  
@@ -67,21 +170,36 @@ index 99870dc..5a4845c 100644
          return false;
      }
  
-@@ -193,6 +210,13 @@ static bool read_calibration_coefficients(baroDev_t *baro) {
-     spl06_cal.c20 = ((uint16_t)caldata[12] << 8) | (uint16_t)caldata[13];
-     spl06_cal.c21 = ((uint16_t)caldata[14] << 8) | (uint16_t)caldata[15];
-     spl06_cal.c30 = ((uint16_t)caldata[16] << 8) | (uint16_t)caldata[17];
+-    spl06_cal.c0 = (caldata[0] & 0x80 ? 0xF000 : 0) | ((uint16_t)caldata[0] << 4) | (((uint16_t)caldata[1] & 0xF0) >> 4);
+-    spl06_cal.c1 = ((caldata[1] & 0x8 ? 0xF000 : 0) | ((uint16_t)caldata[1] & 0x0F) << 8) | (uint16_t)caldata[2];
+-    spl06_cal.c00 = (caldata[3] & 0x80 ? 0xFFF00000 : 0) | ((uint32_t)caldata[3] << 12) | ((uint32_t)caldata[4] << 4) | (((uint32_t)caldata[5] & 0xF0) >> 4);
+-    spl06_cal.c10 = (caldata[5] & 0x8 ? 0xFFF00000 : 0) | (((uint32_t)caldata[5] & 0x0F) << 16) | ((uint32_t)caldata[6] << 8) | (uint32_t)caldata[7];
+-    spl06_cal.c01 = ((uint16_t)caldata[8] << 8) | ((uint16_t)caldata[9]);
+-    spl06_cal.c11 = ((uint16_t)caldata[10] << 8) | (uint16_t)caldata[11];
+-    spl06_cal.c20 = ((uint16_t)caldata[12] << 8) | (uint16_t)caldata[13];
+-    spl06_cal.c21 = ((uint16_t)caldata[14] << 8) | (uint16_t)caldata[15];
+-    spl06_cal.c30 = ((uint16_t)caldata[16] << 8) | (uint16_t)caldata[17];
++    spl06State_t *state = spl06GetState(baro);
++    state->cal.c0 = (caldata[0] & 0x80 ? 0xF000 : 0) | ((uint16_t)caldata[0] << 4) | (((uint16_t)caldata[1] & 0xF0) >> 4);
++    state->cal.c1 = ((caldata[1] & 0x8 ? 0xF000 : 0) | ((uint16_t)caldata[1] & 0x0F) << 8) | (uint16_t)caldata[2];
++    state->cal.c00 = (caldata[3] & 0x80 ? 0xFFF00000 : 0) | ((uint32_t)caldata[3] << 12) | ((uint32_t)caldata[4] << 4) | (((uint32_t)caldata[5] & 0xF0) >> 4);
++    state->cal.c10 = (caldata[5] & 0x8 ? 0xFFF00000 : 0) | (((uint32_t)caldata[5] & 0x0F) << 16) | ((uint32_t)caldata[6] << 8) | (uint32_t)caldata[7];
++    state->cal.c01 = ((uint16_t)caldata[8] << 8) | ((uint16_t)caldata[9]);
++    state->cal.c11 = ((uint16_t)caldata[10] << 8) | (uint16_t)caldata[11];
++    state->cal.c20 = ((uint16_t)caldata[12] << 8) | (uint16_t)caldata[13];
++    state->cal.c21 = ((uint16_t)caldata[14] << 8) | (uint16_t)caldata[15];
++    state->cal.c30 = ((uint16_t)caldata[16] << 8) | (uint16_t)caldata[17];
 +#ifdef SPL06_USE_SPA06
 +    // The signed 12-bit c31 and c40 share register 0x23.
 +    const int16_t c31 = (caldata[18] << 4) | (caldata[19] >> 4);
 +    const int16_t c40 = ((caldata[19] & 0x0f) << 8) | caldata[20];
-+    spl06_cal.c31 = (c31 ^ 0x800) - 0x800;
-+    spl06_cal.c40 = (c40 ^ 0x800) - 0x800;
++    state->cal.c31 = (c31 ^ 0x800) - 0x800;
++    state->cal.c40 = (c40 ^ 0x800) - 0x800;
 +#endif
  
      return true;
  }
-@@ -201,7 +225,10 @@ static bool spl06_configure_measurements(baroDev_t *baro)
+@@ -201,7 +249,10 @@ static bool spl06_configure_measurements(baroDev_t *baro)
  {
      uint8_t reg_value;
  
@@ -93,3 +211,40 @@ index 99870dc..5a4845c 100644
      if (!busWrite(baro->busDev, SPL06_TEMPERATURE_CFG_REG, reg_value)) {
          return false;
      }
+@@ -225,9 +276,12 @@ static bool spl06_configure_measurements(baroDev_t *baro)
+     return true;
+ }
+ 
+-bool spl06Detect(baroDev_t *baro)
++bool spl06DetectTag(baroDev_t *baro, uint8_t tag)
+ {
+-    baro->busDev = busDeviceInit(BUSTYPE_ANY, DEVHW_SPL06, 0, OWNER_BARO);
++    if (tag >= sizeof(spl06State) / sizeof(spl06State[0])) {
++        return false;
++    }
++    baro->busDev = busDeviceInit(BUSTYPE_ANY, DEVHW_SPL06, tag, OWNER_BARO);
+     if (baro->busDev == NULL) {
+         return false;
+     }
+@@ -236,6 +290,7 @@ bool spl06Detect(baroDev_t *baro)
+ 
+     if (!(deviceDetect(baro->busDev) && read_calibration_coefficients(baro) && spl06_configure_measurements(baro))) {
+         busDeviceDeInit(baro->busDev);
++        baro->busDev = NULL;
+         return false;
+     }
+ 
+@@ -248,8 +303,12 @@ bool spl06Detect(baroDev_t *baro)
+     baro->get_up = spl06_read_pressure;
+ 
+     baro->calculate = spl06_calculate;
+-
+     return true;
+ }
+ 
++bool spl06Detect(baroDev_t *baro)
++{
++    return spl06DetectTag(baro, 0);
++}
++
+ #endif

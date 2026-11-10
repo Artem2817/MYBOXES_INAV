@@ -39,6 +39,9 @@ jobs:
           JOBS: "4"
         run: bash build.sh upstream
 
+      - name: Test ICM-42670-P and dual SPA06-003
+        run: python3 tools/check_sensor_drivers.py upstream
+
       - name: Verify and package firmware
         env:
           REVISION: ${{ inputs.revision || '1' }}

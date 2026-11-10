@@ -1,0 +1,603 @@
+diff --git a/src/main/CMakeLists.txt b/src/main/CMakeLists.txt
+index c243d92..c56258d 100755
+--- a/src/main/CMakeLists.txt
++++ b/src/main/CMakeLists.txt
+@@ -86,6 +86,7 @@ main_sources(COMMON_SRC
+     drivers/accgyro/accgyro_icm20689.c
+     drivers/accgyro/accgyro_icm20689.h
+     drivers/accgyro/accgyro_icm42605.c
++    drivers/accgyro/accgyro_icm42670.c
+     drivers/accgyro/accgyro_icm42605.h
+     drivers/accgyro/accgyro_icm45686.c
+     drivers/accgyro/accgyro_icm45686.h
+diff --git a/src/main/config/parameter_group_ids.h b/src/main/config/parameter_group_ids.h
+index 2acb9c8..fa55533 100644
+--- a/src/main/config/parameter_group_ids.h
++++ b/src/main/config/parameter_group_ids.h
+@@ -132,7 +132,8 @@
+ #define PG_GEOZONE_CONFIG 1042
+ #define PG_GEOZONES 1043
+ #define PG_GEOZONE_VERTICES 1044
+-#define PG_INAV_END PG_GEOZONE_VERTICES
++#define PG_MYBOX_SENSOR_CONFIG 1045
++#define PG_INAV_END PG_MYBOX_SENSOR_CONFIG
+ 
+ // OSD configuration (subject to change)
+ //#define PG_OSD_FONT_CONFIG 2047
+diff --git a/src/main/drivers/accgyro/accgyro_icm42670.c b/src/main/drivers/accgyro/accgyro_icm42670.c
+new file mode 100644
+index 0000000..3842b46
+--- /dev/null
++++ b/src/main/drivers/accgyro/accgyro_icm42670.c
+@@ -0,0 +1,146 @@
++// SPDX-License-Identifier: GPL-3.0-or-later
++#include <stdint.h>
++
++#include "platform.h"
++
++#ifdef USE_IMU_ICM42670
++#include "drivers/accgyro/accgyro_icm42670.h"
++#include "drivers/time.h"
++
++// TDK DS-000451, user bank 0. UI sensor data is big-endian after reset.
++enum {
++    ICM42670_REG_RESET = 0x02,
++    ICM42670_REG_TEMP = 0x09,
++    ICM42670_REG_ACCEL = 0x0b,
++    ICM42670_REG_GYRO = 0x11,
++    ICM42670_REG_POWER = 0x1f,
++    ICM42670_REG_GYRO_CONFIG = 0x20,
++    ICM42670_REG_ACCEL_CONFIG = 0x21,
++    ICM42670_REG_DRDY = 0x39,
++    ICM42670_REG_WHO_AM_I = 0x75,
++    ICM42670_WHO_AM_I = 0x67,
++    ICM42670_SOFT_RESET = 0x10,
++    ICM42670_LOW_NOISE = 0x0f,
++    ICM42670_ODR_1600_HZ = 0x05,
++    ICM42670_DRDY = 0x01,
++};
++
++static int16_t icm42670ReadWord(const uint8_t *bytes)
++{
++    return (int16_t)((uint16_t)bytes[0] << 8 | bytes[1]);
++}
++
++static bool icm42670ReadAxes(busDevice_t *dev, uint8_t reg, float *axes)
++{
++    uint8_t bytes[6];
++    int16_t samples[XYZ_AXIS_COUNT];
++    if (!busReadBuf(dev, reg, bytes, sizeof(bytes))) {
++        return false;
++    }
++    for (unsigned axis = 0; axis < XYZ_AXIS_COUNT; ++axis) {
++        samples[axis] = icm42670ReadWord(&bytes[2 * axis]);
++        if (samples[axis] == INT16_MIN) {
++            return false;
++        }
++    }
++    for (unsigned axis = 0; axis < XYZ_AXIS_COUNT; ++axis) {
++        axes[axis] = samples[axis];
++    }
++    return true;
++}
++
++static bool icm42670GyroRead(gyroDev_t *gyro)
++{
++    uint8_t status;
++    return busRead(gyro->busDev, ICM42670_REG_DRDY, &status)
++        && status == ICM42670_DRDY
++        && icm42670ReadAxes(gyro->busDev, ICM42670_REG_GYRO, gyro->gyroADCRaw);
++}
++
++static bool icm42670AccRead(accDev_t *acc)
++{
++    return icm42670ReadAxes(acc->busDev, ICM42670_REG_ACCEL, acc->ADCRaw);
++}
++
++static bool icm42670ReadTemperature(gyroDev_t *gyro, int16_t *temperature)
++{
++    uint8_t bytes[2];
++    if (!busReadBuf(gyro->busDev, ICM42670_REG_TEMP, bytes, sizeof(bytes))) {
++        return false;
++    }
++    const int16_t raw = icm42670ReadWord(bytes);
++    if (raw == INT16_MIN) {
++        return false;
++    }
++    // INAV temperature callbacks use tenths of a degree Celsius.
++    *temperature = 250 + (int16_t)(raw / 12.8f);
++    return true;
++}
++
++static void icm42670AccInit(accDev_t *acc)
++{
++    acc->acc_1G = 2048; // +/-16 g, FS selector 0
++}
++
++static void icm42670GyroInit(gyroDev_t *gyro)
++{
++    gyro->sampleRateIntervalUs = 625; // 1600 Hz
++}
++
++static bool icm42670Configure(busDevice_t *dev)
++{
++    uint8_t id;
++    busSetSpeed(dev, BUS_SPEED_INITIALIZATION);
++    if (!busRead(dev, ICM42670_REG_WHO_AM_I, &id) || id != ICM42670_WHO_AM_I
++        || !busWrite(dev, ICM42670_REG_RESET, ICM42670_SOFT_RESET)) {
++        return false;
++    }
++    delay(10);
++    // FS selector 0 is +/-2000 dps and +/-16 g. Keep the reset filter settings.
++    if (!busWrite(dev, ICM42670_REG_GYRO_CONFIG, ICM42670_ODR_1600_HZ)
++        || !busWrite(dev, ICM42670_REG_ACCEL_CONFIG, ICM42670_ODR_1600_HZ)
++        || !busWrite(dev, ICM42670_REG_POWER, ICM42670_LOW_NOISE)) {
++        return false;
++    }
++    delay(50); // Gyro startup, including the register-write guard after power-up.
++    uint8_t gyroConfig, accelConfig, power;
++    return busRead(dev, ICM42670_REG_GYRO_CONFIG, &gyroConfig)
++        && gyroConfig == ICM42670_ODR_1600_HZ
++        && busRead(dev, ICM42670_REG_ACCEL_CONFIG, &accelConfig)
++        && accelConfig == ICM42670_ODR_1600_HZ
++        && busRead(dev, ICM42670_REG_POWER, &power)
++        && (power & ICM42670_LOW_NOISE) == ICM42670_LOW_NOISE;
++}
++
++bool icm42670GyroDetect(gyroDev_t *gyro)
++{
++    gyro->busDev = busDeviceInit(BUSTYPE_SPI, DEVHW_ICM42670, gyro->imuSensorToUse, OWNER_MPU);
++    if (!gyro->busDev) {
++        return false;
++    }
++    if (!icm42670Configure(gyro->busDev)) {
++        busDeviceDeInit(gyro->busDev);
++        gyro->busDev = NULL;
++        return false;
++    }
++    gyro->initFn = icm42670GyroInit;
++    gyro->readFn = icm42670GyroRead;
++    gyro->intStatusFn = gyroCheckDataReady;
++    gyro->temperatureFn = icm42670ReadTemperature;
++    gyro->scale = 1.0f / 16.4f;
++    gyro->gyroAlign = gyro->busDev->param;
++    return true;
++}
++
++bool icm42670AccDetect(accDev_t *acc)
++{
++    acc->busDev = busDeviceOpen(BUSTYPE_SPI, DEVHW_ICM42670, acc->imuSensorToUse);
++    if (!acc->busDev) {
++        return false;
++    }
++    acc->initFn = icm42670AccInit;
++    acc->readFn = icm42670AccRead;
++    acc->accAlign = acc->busDev->param;
++    return true;
++}
++#endif
+diff --git a/src/main/drivers/accgyro/accgyro_icm42670.h b/src/main/drivers/accgyro/accgyro_icm42670.h
+new file mode 100644
+index 0000000..778ecac
+--- /dev/null
++++ b/src/main/drivers/accgyro/accgyro_icm42670.h
+@@ -0,0 +1,7 @@
++// SPDX-License-Identifier: GPL-3.0-or-later
++#pragma once
++
++#include "drivers/accgyro/accgyro.h"
++
++bool icm42670AccDetect(accDev_t *acc);
++bool icm42670GyroDetect(gyroDev_t *gyro);
+diff --git a/src/main/drivers/barometer/barometer_spl06.h b/src/main/drivers/barometer/barometer_spl06.h
+index a92f1c5..746ae40 100644
+--- a/src/main/drivers/barometer/barometer_spl06.h
++++ b/src/main/drivers/barometer/barometer_spl06.h
+@@ -68,4 +68,5 @@
+ #define SPL06_MEASUREMENT_TIME(oversampling)   ((2 + lrintf(oversampling * 1.6)) + 1) // ms
+ 
+ bool spl06Detect(baroDev_t *baro);
++bool spl06DetectTag(baroDev_t *baro, uint8_t tag);
+ 
+diff --git a/src/main/drivers/bus.h b/src/main/drivers/bus.h
+index 385fbd3..f5caa85 100644
+--- a/src/main/drivers/bus.h
++++ b/src/main/drivers/bus.h
+@@ -149,6 +149,7 @@ typedef enum {
+     DEVHW_SDCARD,       // Generic SD-Card
+     DEVHW_IRLOCK,       // IR-Lock visual positioning hardware
+     DEVHW_PCF8574,      // 8-bit I/O expander
++    DEVHW_ICM42670,
+ } devHardwareType_e;
+ 
+ typedef enum {
+diff --git a/src/main/fc/cli.c b/src/main/fc/cli.c
+index 9bb2c77..ecf2f47 100644
+--- a/src/main/fc/cli.c
++++ b/src/main/fc/cli.c
+@@ -24,6 +24,9 @@
+ #include <ctype.h>
+ 
+ #include "platform.h"
++#ifdef USE_MYBOX_V2_SENSORS
++#include "mybox_sensors.h"
++#endif
+ 
+ bool cliMode = false;
+ 
+@@ -230,7 +233,7 @@ static const char *debugModeNames[DEBUG_COUNT] = {
+ // sync with gyroSensor_e
+ static const char *const gyroNames[] = {
+     "NONE",     "AUTO",   "MPU6000",  "MPU6500", "MPU9250", "BMI160",
+-    "ICM20689", "BMI088", "ICM42605", "BMI270",  "LSM6DXX", "ICM45686", "FAKE"};
++    "ICM20689", "BMI088", "ICM42605", "BMI270",  "LSM6DXX", "ICM45686", "FAKE", "ICM42670"};
+ 
+ // sync this with sensors_e
+ static const char * const sensorTypeNames[] = {
+@@ -4144,6 +4147,23 @@ static void cliStatus(char *cmdline)
+ #endif // for if at32
+ #endif // for SITL
+ 
++#ifdef USE_MYBOX_VIB
++    cliPrintLinef("MYBOX active IMU: %d", gyroConfig()->gyro_to_use);
++    for (uint8_t index = 0; index < 2; ++index) {
++        int16_t temperature;
++        int32_t pressure;
++        if (myboxImuSample(index, &temperature)) {
++            cliPrintLinef("MYBOX IMU %d: OK, temperature %d dC", index, temperature);
++        } else {
++            cliPrintLinef("MYBOX IMU %d: no valid sample", index);
++        }
++        if (myboxBarometerSample(index, &pressure)) {
++            cliPrintLinef("MYBOX barometer %d: %ld Pa", index, (long)pressure);
++        } else {
++            cliPrintLinef("MYBOX barometer %d: no valid sample", index);
++        }
++    }
++#endif
+     cliPrintLinef("Sensor status: GYRO=%s, ACC=%s, MAG=%s, BARO=%s, RANGEFINDER=%s, OPFLOW=%s, PITOT=%s, GPS=%s",
+         hardwareSensorStatusNames[getHwGyroStatus()],
+         hardwareSensorStatusNames[getHwAccelerometerStatus()],
+diff --git a/src/main/fc/fc_init.c b/src/main/fc/fc_init.c
+index a8ca6c0..e932161 100644
+--- a/src/main/fc/fc_init.c
++++ b/src/main/fc/fc_init.c
+@@ -20,6 +20,9 @@
+ #include <string.h>
+ 
+ #include "platform.h"
++#ifdef USE_MYBOX_V2_SENSORS
++#include "mybox_sensors.h"
++#endif
+ 
+ #include "blackbox/blackbox.h"
+ #include "blackbox/blackbox_io.h"
+@@ -533,6 +536,9 @@ void init(void)
+         failureMode(FAILURE_MISSING_ACC);
+     }
+ 
++#ifdef USE_MYBOX_V2_SENSORS
++    myboxSensorsInit();
++#endif
+     systemState |= SYSTEM_STATE_SENSORS_READY;
+ 
+     flashLedsAndBeep();
+diff --git a/src/main/fc/fc_tasks.c b/src/main/fc/fc_tasks.c
+index 4ca125d..1e854c0 100755
+--- a/src/main/fc/fc_tasks.c
++++ b/src/main/fc/fc_tasks.c
+@@ -20,6 +20,9 @@
+ #include <stdint.h>
+ 
+ #include "platform.h"
++#ifdef USE_MYBOX_V2_SENSORS
++#include "mybox_sensors.h"
++#endif
+ 
+ #include "cms/cms.h"
+ 
+@@ -156,6 +159,9 @@ void taskUpdateTemperature(timeUs_t currentTimeUs)
+ {
+     UNUSED(currentTimeUs);
+     temperatureUpdate();
++#ifdef USE_MYBOX_V2_SENSORS
++    myboxSensorsUpdate();
++#endif
+ }
+ 
+ #ifdef USE_GPS
+@@ -207,6 +213,11 @@ void taskUpdateBaro(timeUs_t currentTimeUs)
+         rescheduleTask(TASK_SELF, newDeadline);
+     }
+ 
++#ifdef USE_MYBOX_V2_SENSORS
++    if (!baroIsHealthy()) {
++        return;
++    }
++#endif
+     updatePositionEstimator_BaroTopic(currentTimeUs);
+ }
+ #endif
+diff --git a/src/main/fc/settings.yaml b/src/main/fc/settings.yaml
+index 4e8affb..210a00d 100644
+--- a/src/main/fc/settings.yaml
++++ b/src/main/fc/settings.yaml
+@@ -2,7 +2,7 @@ tables:
+   - name: alignment
+     values: ["DEFAULT", "CW0", "CW90", "CW180", "CW270", "CW0FLIP", "CW90FLIP", "CW180FLIP", "CW270FLIP"]
+   - name: acc_hardware
+-    values: ["NONE", "AUTO", "MPU6000", "MPU6500", "MPU9250", "BMI160", "ICM20689", "BMI088", "ICM42605", "BMI270","LSM6DXX", "ICM45686", "FAKE"]
++    values: ["NONE", "AUTO", "MPU6000", "MPU6500", "MPU9250", "BMI160", "ICM20689", "BMI088", "ICM42605", "BMI270","LSM6DXX", "ICM45686", "FAKE", "ICM42670"]
+     enum: accelerationSensor_e
+   - name: rangefinder_hardware
+     values: ["NONE", "SRF10", "VL53L0X", "MSP", "BENEWAKE", "VL53L1X", "US42", "TOF10120_I2C", "FAKE", "TERARANGER_EVO", "USD1_V0", "NRA"]
+@@ -858,6 +858,25 @@ groups:
+         max: 255
+         default_value: 14
+ 
++  - name: PG_MYBOX_SENSOR_CONFIG
++    condition: USE_MYBOX_V2_SENSORS
++    type: myboxSensorConfig_t
++    headers: ["mybox_sensors.h"]
++    members:
++      - name: mybox_heater_target
++        description: "IMU heater target in degrees C. 0 disables heating."
++        field: heaterTargetC
++        default_value: 0
++        min: 0
++        max: 45
++      - name: mybox_baro_to_use
++        description: "Preferred barometer. 0 is the main board, 1 is the J19 module."
++        condition: USE_MYBOX_VIB
++        field: barometerIndex
++        default_value: 0
++        min: 0
++        max: 1
++
+   - name: PG_FAILSAFE_CONFIG
+     type: failsafeConfig_t
+     headers: ["flight/failsafe.h"]
+diff --git a/src/main/sensors/acceleration.c b/src/main/sensors/acceleration.c
+index cc52be6..d99cbd0 100644
+--- a/src/main/sensors/acceleration.c
++++ b/src/main/sensors/acceleration.c
+@@ -46,6 +46,7 @@
+ #include "drivers/accgyro/accgyro_icm20689.h"
+ #include "drivers/accgyro/accgyro_icm42605.h"
+ #include "drivers/accgyro/accgyro_icm45686.h"
++#include "drivers/accgyro/accgyro_icm42670.h"
+ #include "drivers/accgyro/accgyro_lsm6dxx.h"
+ #include "drivers/accgyro/accgyro_fake.h"
+ #include "drivers/sensor.h"
+@@ -260,6 +261,17 @@ static bool accDetect(accDev_t *dev, accelerationSensor_e accHardwareToUse)
+         }
+         FALLTHROUGH;
+ #endif
++#ifdef USE_IMU_ICM42670
++    case ACC_ICM42670:
++        if (icm42670AccDetect(dev)) {
++            accHardware = ACC_ICM42670;
++            break;
++        }
++        if (accHardwareToUse != ACC_AUTODETECT) {
++            break;
++        }
++        FALLTHROUGH;
++#endif
+ #ifdef USE_IMU_FAKE
+     case ACC_FAKE:
+         if (fakeAccDetect(dev)) {
+diff --git a/src/main/sensors/acceleration.h b/src/main/sensors/acceleration.h
+index ea76b63..10eefbd 100644
+--- a/src/main/sensors/acceleration.h
++++ b/src/main/sensors/acceleration.h
+@@ -46,7 +46,8 @@ typedef enum {
+     ACC_LSM6DXX,
+     ACC_ICM45686,
+     ACC_FAKE,
+-    ACC_MAX = ACC_FAKE
++    ACC_ICM42670,
++    ACC_MAX = ACC_ICM42670
+ } accelerationSensor_e;
+ 
+ typedef struct {
+diff --git a/src/main/sensors/barometer.c b/src/main/sensors/barometer.c
+index a9c2d84..3748d47 100644
+--- a/src/main/sensors/barometer.c
++++ b/src/main/sensors/barometer.c
+@@ -49,6 +49,9 @@
+ 
+ #include "sensors/barometer.h"
+ #include "sensors/sensors.h"
++#ifdef USE_MYBOX_V2_SENSORS
++#include "mybox_sensors.h"
++#endif
+ 
+ #ifdef USE_HARDWARE_REVISION_DETECTION
+ #include "hardware_revision.h"
+@@ -238,12 +241,82 @@ bool baroDetect(baroDev_t *dev, baroSensor_e baroHardwareToUse)
+     return true;
+ }
+ 
++#ifdef USE_MYBOX_V2_SENSORS
++typedef struct {
++    bool tempStarted;
++    bool pressureStarted;
++    bool temperatureValid;
++    bool valid;
++    int32_t pressure;
++    int32_t temperature;
++} myboxPressureSample_t;
++
++static myboxPressureSample_t selectedBaroSample;
++#ifdef USE_MYBOX_VIB
++static myboxPressureSample_t secondaryBaroSample;
++static baroDev_t secondaryBaro;
++static bool secondaryBaroPresent;
++#endif
++
++static void myboxBaroStartPressure(baroDev_t *device, myboxPressureSample_t *sample)
++{
++    sample->temperatureValid = sample->tempStarted && device->get_ut(device);
++    sample->pressureStarted = device->start_up(device);
++}
++
++static void myboxBaroCollect(baroDev_t *device, myboxPressureSample_t *sample)
++{
++    const bool pressureValid = sample->pressureStarted && device->get_up(device);
++    sample->tempStarted = device->start_ut(device);
++    sample->valid = pressureValid && sample->temperatureValid
++        && device->calculate(device, &sample->pressure, &sample->temperature)
++        && sample->pressure >= 20000 && sample->pressure <= 120000;
++}
++
++bool myboxBarometerSample(uint8_t index, int32_t *pressurePa)
++{
++    if (detectedSensors[SENSOR_INDEX_BARO] == BARO_SPL06
++        && baro.dev.busDev->descriptorPtr->tag == index && selectedBaroSample.valid) {
++        *pressurePa = selectedBaroSample.pressure;
++        return true;
++    }
++#ifdef USE_MYBOX_VIB
++    if (secondaryBaroPresent && secondaryBaro.busDev->descriptorPtr->tag == index && secondaryBaroSample.valid) {
++        *pressurePa = secondaryBaroSample.pressure;
++        return true;
++    }
++#endif
++    return false;
++}
++#endif
++
+ bool baroInit(void)
+ {
+-    if (!baroDetect(&baro.dev, barometerConfig()->baro_hardware)) {
+-        return false;
++    const baroSensor_e requested = barometerConfig()->baro_hardware;
++    bool detected = baroDetect(&baro.dev, requested);
++#ifdef USE_MYBOX_VIB
++    if (requested == BARO_AUTODETECT || requested == BARO_SPL06) {
++        secondaryBaroPresent = spl06DetectTag(&secondaryBaro, 1);
++        if (secondaryBaroPresent && (!detected || myboxSensorConfig()->barometerIndex == 1)) {
++            const baroDev_t mainBaro = baro.dev;
++            baro.dev = secondaryBaro;
++            secondaryBaro = mainBaro;
++            secondaryBaroPresent = detected;
++            detected = true;
++            detectedSensors[SENSOR_INDEX_BARO] = BARO_SPL06;
++            sensorsSet(SENSOR_BARO);
++        }
++        if (secondaryBaroPresent) {
++            secondaryBaroSample.tempStarted = secondaryBaro.start_ut(&secondaryBaro);
++        }
+     }
+-    return true;
++#endif
++#ifdef USE_MYBOX_V2_SENSORS
++    if (detected && detectedSensors[SENSOR_INDEX_BARO] == BARO_SPL06) {
++        selectedBaroSample.tempStarted = baro.dev.start_ut(&baro.dev);
++    }
++#endif
++    return detected;
+ }
+ 
+ typedef enum {
+@@ -261,6 +334,33 @@ uint32_t baroUpdate(void)
+     }
+ #endif
+ 
++#ifdef USE_MYBOX_V2_SENSORS
++    if (detectedSensors[SENSOR_INDEX_BARO] == BARO_SPL06) {
++        if (state == BAROMETER_NEEDS_SAMPLES) {
++            myboxBaroStartPressure(&baro.dev, &selectedBaroSample);
++#ifdef USE_MYBOX_VIB
++            if (secondaryBaroPresent) {
++                myboxBaroStartPressure(&secondaryBaro, &secondaryBaroSample);
++            }
++#endif
++            state = BAROMETER_NEEDS_CALCULATION;
++            return baro.dev.up_delay;
++        }
++        myboxBaroCollect(&baro.dev, &selectedBaroSample);
++#ifdef USE_MYBOX_VIB
++        if (secondaryBaroPresent) {
++            myboxBaroCollect(&secondaryBaro, &secondaryBaroSample);
++        }
++#endif
++        if (selectedBaroSample.valid) {
++            baro.baroPressure = selectedBaroSample.pressure;
++            baro.baroTemperature = selectedBaroSample.temperature;
++        }
++        state = BAROMETER_NEEDS_SAMPLES;
++        return baro.dev.ut_delay;
++    }
++#endif
++
+     switch (state) {
+         default:
+         case BAROMETER_NEEDS_SAMPLES:
+@@ -344,6 +444,11 @@ int16_t baroGetTemperature(void)
+ 
+ bool baroIsHealthy(void)
+ {
++#ifdef USE_MYBOX_V2_SENSORS
++    if (detectedSensors[SENSOR_INDEX_BARO] == BARO_SPL06) {
++        return selectedBaroSample.valid;
++    }
++#endif
+     return sensors(SENSOR_BARO);
+ }
+ 
+diff --git a/src/main/sensors/gyro.c b/src/main/sensors/gyro.c
+index 8544b45..999d2a4 100644
+--- a/src/main/sensors/gyro.c
++++ b/src/main/sensors/gyro.c
+@@ -48,6 +48,7 @@
+ #include "drivers/accgyro/accgyro_icm20689.h"
+ #include "drivers/accgyro/accgyro_icm42605.h"
+ #include "drivers/accgyro/accgyro_icm45686.h"
++#include "drivers/accgyro/accgyro_icm42670.h"
+ #include "drivers/accgyro/accgyro_lsm6dxx.h"
+ #include "drivers/accgyro/accgyro_fake.h"
+ #include "drivers/io.h"
+@@ -100,7 +101,11 @@ EXTENDED_FASTRAM secondaryDynamicGyroNotchState_t secondaryDynamicGyroNotchState
+ 
+ #endif
+ 
++#ifdef USE_MYBOX_VIB
++PG_REGISTER_WITH_RESET_TEMPLATE(gyroConfig_t, gyroConfig, PG_GYRO_CONFIG, 13);
++#else
+ PG_REGISTER_WITH_RESET_TEMPLATE(gyroConfig_t, gyroConfig, PG_GYRO_CONFIG, 12);
++#endif
+ 
+ PG_RESET_TEMPLATE(gyroConfig_t, gyroConfig,
+     .gyro_anti_aliasing_lpf_hz = SETTING_GYRO_ANTI_ALIASING_LPF_HZ_DEFAULT,
+@@ -238,6 +243,15 @@ STATIC_UNIT_TESTED gyroSensor_e gyroDetect(gyroDev_t *dev, gyroSensor_e gyroHard
+         FALLTHROUGH;
+ #endif
+ 
++#ifdef USE_IMU_ICM42670
++    case GYRO_ICM42670:
++        if (icm42670GyroDetect(dev)) {
++            gyroHardware = GYRO_ICM42670;
++            break;
++        }
++        FALLTHROUGH;
++#endif
++
+ #ifdef USE_IMU_FAKE
+     case GYRO_FAKE:
+         if (fakeGyroDetect(dev)) {
+diff --git a/src/main/sensors/gyro.h b/src/main/sensors/gyro.h
+index 18fe5d9..1af823c 100644
+--- a/src/main/sensors/gyro.h
++++ b/src/main/sensors/gyro.h
+@@ -44,7 +44,8 @@ typedef enum {
+     GYRO_BMI270,
+     GYRO_LSM6DXX,
+     GYRO_ICM45686,
+-    GYRO_FAKE
++    GYRO_FAKE,
++    GYRO_ICM42670
+ } gyroSensor_e;
+ 
+ typedef enum {
