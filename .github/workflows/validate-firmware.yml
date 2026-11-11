@@ -45,6 +45,9 @@ jobs:
       - name: Test SD filesystem mount and log persistence
         run: python3 tools/check_sd_filesystem.py upstream
 
+      - name: Test SDMMC startup and fallback
+        run: python3 tools/check_sdmmc_startup.py upstream
+
       - name: Test dedicated RCIN SBUS decoding
         run: |
           gcc -std=c11 -Wall -Wextra -Werror -I upstream/src/main/target/MYBOXH743MINI \
