@@ -15,6 +15,13 @@ BUSDEV_REGISTER_SPI_TAG(myboxModuleImu, DEVHW_ICM42670, BUS_SPI1, PA4, NONE, 1, 
 BUSDEV_REGISTER_I2C_TAG(myboxModuleBaro, DEVHW_SPL06, BUS_I2C1, 0x77, NONE, 1, DEVFLAGS_NONE, 0);
 #endif
 
+// The common registry provides I2C2 (tag 0). Probe the remaining buses in order.
+#ifdef USE_I2C_DEVICE_4
+BUSDEV_REGISTER_I2C_TAG(myboxPitotI2c4, DEVHW_MS4525, BUS_I2C4, 0x28, NONE, 1, DEVFLAGS_USE_RAW_REGISTERS, 0);
+#endif
+BUSDEV_REGISTER_I2C_TAG(myboxPitotI2c1, DEVHW_MS4525, BUS_I2C1, 0x28, NONE,
+    MS4525_PROBE_COUNT - 1, DEVFLAGS_USE_RAW_REGISTERS, 0);
+
 void targetConfiguration(void)
 {
     motorConfigMutable()->motorPwmProtocol = PWM_TYPE_STANDARD;

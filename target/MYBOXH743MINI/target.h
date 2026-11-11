@@ -71,6 +71,7 @@
 #define DEFAULT_CURRENT_METER_SOURCE CURRENT_METER_ADC
 #define USE_PITOT
 #define USE_PITOT_ADC
+#define MS4525_I2C_BUS          BUS_I2C2
 
 #define USE_SDCARD
 #define USE_SDCARD_SDIO
@@ -101,11 +102,11 @@
 #define I2C1_SCL                PB6
 #define USE_BARO_MS5611
 #define MS5611_I2C_ADDR         0x77
-#define MS4525_I2C_BUS          BUS_I2C2
 #define USE_UART4
 #define UART4_TX_PIN            PB9
 #define UART4_RX_PIN            PB8
 #define GPS_UART                SERIAL_PORT_USART4
+#define MS4525_PROBE_COUNT     2
 #define MAX_PWM_OUTPUT_PORTS    14
 #define VBAT_SCALE_DEFAULT      2000
 
@@ -151,6 +152,7 @@
 #define GPS_UART                SERIAL_PORT_USART1
 #define BEEPER                  PB4
 #define BEEPER_PWM_FREQUENCY    2500
+#define MS4525_PROBE_COUNT     3
 #define MAX_PWM_OUTPUT_PORTS    13
 #define VBAT_SCALE_DEFAULT      2100
 

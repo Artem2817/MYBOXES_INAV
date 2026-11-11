@@ -212,6 +212,60 @@ index 385fbd3..f5caa85 100644
  } devHardwareType_e;
  
  typedef enum {
+diff --git a/src/main/drivers/pitotmeter/pitotmeter_ms4525.c b/src/main/drivers/pitotmeter/pitotmeter_ms4525.c
+index c5272cc..5749db6 100644
+--- a/src/main/drivers/pitotmeter/pitotmeter_ms4525.c
++++ b/src/main/drivers/pitotmeter/pitotmeter_ms4525.c
+@@ -27,8 +27,9 @@
+ #include "drivers/time.h"
+ #include "drivers/pitotmeter/pitotmeter.h"
+ 
+-// MS4525, Standard address 0x28
+-#define MS4525_ADDR                 0x28
++#ifndef MS4525_PROBE_COUNT
++#define MS4525_PROBE_COUNT 1
++#endif
+ 
+ typedef struct __attribute__ ((__packed__)) ms4525Ctx_s {
+     bool     dataValid;
+@@ -119,20 +120,24 @@ static void ms4525_calculate(pitotDev_t * pitot, float *pressure, float *tempera
+ bool ms4525Detect(pitotDev_t * pitot)
+ {
+     uint8_t rxbuf[4];
+-    bool ack = false;
+-
+-    pitot->busDev = busDeviceInit(BUSTYPE_I2C, DEVHW_MS4525, 0, OWNER_AIRSPEED);
+-    if (pitot->busDev == NULL) {
+-        return false;
++    pitot->busDev = NULL;
++
++    for (uint8_t tag = 0; tag < MS4525_PROBE_COUNT; ++tag) {
++        busDevice_t *candidate = busDeviceInit(BUSTYPE_I2C, DEVHW_MS4525, tag, OWNER_AIRSPEED);
++        if (candidate == NULL) {
++            continue;
++        }
++
++        // Repeat the read so the sensor can recover from a previous START/STOP without clock pulses.
++        busReadBuf(candidate, 0xFF, rxbuf, sizeof(rxbuf));
++        if (busReadBuf(candidate, 0xFF, rxbuf, sizeof(rxbuf))) {
++            pitot->busDev = candidate;
++            break;
++        }
++
++        busDeviceDeInit(candidate);
+     }
+-
+-    // Read twice to fix:
+-    // Sending a start-stop condition without any transitions on the SCL line (no clock pulses in between) creates a
+-    // communication error for the next communication, even if the next start condition is correct and the clock pulse is applied.
+-    // An additional start condition must be sent, which results in restoration of proper communication.
+-    ack = busReadBuf(pitot->busDev, 0xFF, rxbuf, 4);
+-    ack = busReadBuf(pitot->busDev, 0xFF, rxbuf, 4);
+-    if (!ack) {
++    if (pitot->busDev == NULL) {
+         return false;
+     }
+ 
 diff --git a/src/main/fc/cli.c b/src/main/fc/cli.c
 index 9bb2c77..ea2137c 100644
 --- a/src/main/fc/cli.c

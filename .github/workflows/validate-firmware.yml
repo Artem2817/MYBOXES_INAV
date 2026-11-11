@@ -39,7 +39,7 @@ jobs:
           JOBS: "4"
         run: bash build.sh upstream
 
-      - name: Test ICM-42670-P and dual SPA06-003
+      - name: Test ICM-42670-P, dual SPA06-003 and MS4525 bus probing
         run: python3 tools/check_sensor_drivers.py upstream
 
       - name: Test dedicated RCIN SBUS decoding
