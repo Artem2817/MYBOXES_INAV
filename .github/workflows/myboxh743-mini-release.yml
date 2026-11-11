@@ -57,7 +57,9 @@ jobs:
             title=$(jq -er '.board_name + " INAV " + .version + " r" + (.revision | tostring) + "-dev"' "$manifest")
             firmware=$(jq -er '.files[0].name' "$manifest")
             notes="Стендовая сборка MYBOX H743 Mini. PWM, USB DFU, локальный HEX в INAV Configurator 9.1 и SBUS на RCIN через mybox_sbus_rcin."
-            if [[ "$directory" == dist/mini-v2-vib ]]; then
+            if [[ "$directory" == dist/mini ]]; then
+              notes="$notes MS4525 на внешней I²C2. Для датчика выберите pitot_hardware = MS4525."
+            elif [[ "$directory" == dist/mini-v2-vib ]]; then
               notes="$notes Оба IMU и оба SPA06-003 доступны для проверки. Приоритет у выносных IMU и барометра. Ориентация выносного ICM-42670-P временная."
             fi
             gh release create "$tag" "$directory/$firmware" "$manifest" "$directory/SHA256SUMS.txt" \

@@ -101,6 +101,7 @@
 #define I2C1_SCL                PB6
 #define USE_BARO_MS5611
 #define MS5611_I2C_ADDR         0x77
+#define MS4525_I2C_BUS          BUS_I2C2
 #define USE_UART4
 #define UART4_TX_PIN            PB9
 #define UART4_RX_PIN            PB8
