@@ -58,6 +58,7 @@ jobs:
             firmware=$(jq -er '.files[0].name' "$manifest")
             notes="Стендовая сборка MYBOX H743 Mini. PWM, USB DFU, локальный HEX в INAV Configurator 9.1 и SBUS на RCIN через mybox_sbus_rcin."
             notes="$notes Для MS4525 выберите pitot_hardware = MS4525. Опрос начинается с I²C2, затем проверяются остальные доступные I²C."
+            notes="$notes Blackbox открывает FAT16/FAT32 в разделе MBR и без таблицы разделов."
             if [[ "$directory" == dist/mini-v2-vib ]]; then
               notes="$notes Оба IMU и оба SPA06-003 доступны для проверки. Приоритет у выносных IMU и барометра. Ориентация выносного ICM-42670-P временная."
             fi

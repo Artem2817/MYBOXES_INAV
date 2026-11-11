@@ -267,7 +267,7 @@ index c5272cc..5749db6 100644
      }
  
 diff --git a/src/main/fc/cli.c b/src/main/fc/cli.c
-index 9bb2c77..ea2137c 100644
+index 9bb2c77..ec16bd0 100644
 --- a/src/main/fc/cli.c
 +++ b/src/main/fc/cli.c
 @@ -24,6 +24,9 @@
@@ -289,6 +289,15 @@ index 9bb2c77..ea2137c 100644
  
  // sync this with sensors_e
  static const char * const sensorTypeNames[] = {
+@@ -2897,7 +2900,7 @@ static void cliSdInfo(char *cmdline)
+ 
+             switch (afatfs_getLastError()) {
+                 case AFATFS_ERROR_BAD_MBR:
+-                    cliPrint(" - no FAT MBR partitions");
++                    cliPrint(" - no FAT16/FAT32 boot sector or MBR partition");
+                 break;
+                 case AFATFS_ERROR_BAD_FILESYSTEM_HEADER:
+                     cliPrint(" - bad FAT header");
 @@ -4144,6 +4147,26 @@ static void cliStatus(char *cmdline)
  #endif // for if at32
  #endif // for SITL
@@ -426,6 +435,282 @@ index 4e8affb..1d9b64f 100644
    - name: PG_FAILSAFE_CONFIG
      type: failsafeConfig_t
      headers: ["flight/failsafe.h"]
+diff --git a/src/main/io/asyncfatfs/asyncfatfs.c b/src/main/io/asyncfatfs/asyncfatfs.c
+index d06fc2b..b24d969 100644
+--- a/src/main/io/asyncfatfs/asyncfatfs.c
++++ b/src/main/io/asyncfatfs/asyncfatfs.c
+@@ -40,9 +40,8 @@
+ 
+ #define AFATFS_NUM_CACHE_SECTORS 8
+ 
+-// FAT filesystems are allowed to differ from these parameters, but we choose not to support those weird filesystems:
+ #define AFATFS_SECTOR_SIZE  512
+-#define AFATFS_NUM_FATS     2
++#define AFATFS_MBR_PARTITIONS 4
+ 
+ #define AFATFS_MAX_OPEN_FILES 3
+ 
+@@ -408,6 +407,7 @@ typedef struct afatfsFile_t {
+ typedef enum {
+     AFATFS_INITIALIZATION_READ_MBR,
+     AFATFS_INITIALIZATION_READ_VOLUME_ID,
++    AFATFS_INITIALIZATION_OPEN_ROOT,
+ 
+ #ifdef AFATFS_USE_FREEFILE
+     AFATFS_INITIALIZATION_FREEFILE_CREATE,
+@@ -421,6 +421,11 @@ typedef enum {
+     AFATFS_INITIALIZATION_DONE
+ } afatfsInitializationPhase_e;
+ 
++typedef struct {
++    uint32_t startSector;
++    uint32_t sectorCount;
++} afatfsPartition_t;
++
+ typedef struct afatfs_t {
+     fatFilesystemType_e filesystemType;
+ 
+@@ -428,12 +433,17 @@ typedef struct afatfs_t {
+     afatfsInitializationPhase_e initPhase;
+ 
+     // State used during FS initialisation where only one member of the union is used at a time
+-#ifdef AFATFS_USE_FREEFILE
+     union {
++        struct {
++            afatfsPartition_t partitions[AFATFS_MBR_PARTITIONS];
++            uint8_t count;
++            uint8_t index;
++        } partitionProbe;
++#ifdef AFATFS_USE_FREEFILE
+         afatfsFreeSpaceSearch_t freeSpaceSearch;
+         afatfsFreeSpaceFAT_t freeSpaceFAT;
+-    } initState;
+ #endif
++    } initState;
+ 
+ #ifdef STM32H7
+     uint8_t *cache;
+@@ -459,8 +469,6 @@ typedef struct afatfs_t {
+     // The current working directory:
+     afatfsFile_t currentDirectory;
+ 
+-    uint32_t partitionStartSector; // The physical sector that the first partition on the device begins at
+-
+     uint32_t fatStartSector; // The first sector of the first FAT
+     uint32_t fatSectors;     // The size in sectors of a single FAT
+ 
+@@ -862,7 +870,7 @@ static uint32_t afatfs_fileClusterToPhysical(uint32_t clusterNumber, uint32_t se
+ static uint32_t afatfs_fileGetCursorPhysicalSector(afatfsFilePtr_t file)
+ {
+     if (file->type == AFATFS_FILE_TYPE_FAT16_ROOT_DIRECTORY) {
+-        return afatfs.fatStartSector + AFATFS_NUM_FATS * afatfs.fatSectors + file->cursorOffset / AFATFS_SECTOR_SIZE;
++        return afatfs.clusterStartSector - afatfs.rootDirectorySectors + file->cursorOffset / AFATFS_SECTOR_SIZE;
+     } else {
+         uint32_t cursorSectorInCluster = afatfs_sectorIndexInCluster(file->cursorOffset);
+         return afatfs_fileClusterToPhysical(file->cursorCluster, cursorSectorInCluster);
+@@ -966,86 +974,88 @@ static afatfsOperationStatus_e afatfs_cacheSector(uint32_t physicalSectorIndex,
+     }
+ }
+ 
+-/**
+- * Parse the details out of the given MBR sector (512 bytes long). Return true if a compatible filesystem was found.
+- */
+-static bool afatfs_parseMBR(const uint8_t *sector)
++static bool afatfs_parseMBR(const uint8_t *sector, uint32_t diskSectors)
+ {
+-    // Check MBR signature
+-    if (sector[AFATFS_SECTOR_SIZE - 2] != 0x55 || sector[AFATFS_SECTOR_SIZE - 1] != 0xAA)
++    if (sector[510] != 0x55 || sector[511] != 0xaa) {
+         return false;
++    }
+ 
+-    mbrPartitionEntry_t *partition = (mbrPartitionEntry_t *) (sector + 446);
+-
+-    for (int i = 0; i < 4; i++) {
+-        if (
+-            partition[i].lbaBegin > 0
+-            && (
+-                partition[i].type == MBR_PARTITION_TYPE_FAT32
+-                || partition[i].type == MBR_PARTITION_TYPE_FAT32_LBA
+-                || partition[i].type == MBR_PARTITION_TYPE_FAT16
+-                || partition[i].type == MBR_PARTITION_TYPE_FAT16_LBA
+-            )
+-        ) {
+-            afatfs.partitionStartSector = partition[i].lbaBegin;
++    const mbrPartitionEntry_t *entries = (const mbrPartitionEntry_t *)(sector + 446);
++    afatfs.initState.partitionProbe.count = 0;
++    afatfs.initState.partitionProbe.index = 0;
++
++    // Keep the original preference for FAT partition types. A different type can still contain a valid FAT volume.
++    for (unsigned pass = 0; pass < 2; ++pass) {
++        for (unsigned i = 0; i < AFATFS_MBR_PARTITIONS; ++i) {
++            const mbrPartitionEntry_t *entry = &entries[i];
++            const uint8_t type = entry->type;
++            const bool fat = type == 0x04 || type == MBR_PARTITION_TYPE_FAT16 || type == MBR_PARTITION_TYPE_FAT16_LBA
++                || type == MBR_PARTITION_TYPE_FAT32 || type == MBR_PARTITION_TYPE_FAT32_LBA;
++            if (fat != (pass == 0) || type == 0 || type == 0x05 || type == 0x0f || type == 0x85 || type == 0xee
++                || entry->lbaBegin == 0 || entry->lbaBegin >= diskSectors || entry->numSectors == 0
++                || entry->numSectors > diskSectors - entry->lbaBegin) {
++                continue;
++            }
+ 
+-            return true;
++            afatfsPartition_t *partition = &afatfs.initState.partitionProbe.partitions[afatfs.initState.partitionProbe.count++];
++            partition->startSector = entry->lbaBegin;
++            partition->sectorCount = entry->numSectors;
+         }
+     }
+ 
+-    return false;
++    return afatfs.initState.partitionProbe.count > 0;
+ }
+ 
+-static bool afatfs_parseVolumeID(const uint8_t *sector)
++static bool afatfs_parseVolumeID(const uint8_t *sector, uint32_t startSector, uint32_t sectorCount)
+ {
+-    fatVolumeID_t *volume = (fatVolumeID_t *) sector;
+-
+-    afatfs.filesystemType = FAT_FILESYSTEM_TYPE_INVALID;
++    const fatVolumeID_t *volume = (const fatVolumeID_t *)sector;
++    const uint32_t sectorsPerCluster = volume->sectorsPerCluster;
+ 
+-    if (volume->bytesPerSector != AFATFS_SECTOR_SIZE || volume->numFATs != AFATFS_NUM_FATS
+-            || sector[510] != FAT_VOLUME_ID_SIGNATURE_1 || sector[511] != FAT_VOLUME_ID_SIGNATURE_2) {
++    if (volume->bytesPerSector != AFATFS_SECTOR_SIZE || volume->numFATs < 1 || volume->numFATs > 2
++        || volume->reservedSectorCount == 0
++        || sector[510] != FAT_VOLUME_ID_SIGNATURE_1 || sector[511] != FAT_VOLUME_ID_SIGNATURE_2
++        || sectorsPerCluster == 0 || sectorsPerCluster > 128 || !isPowerOfTwo(sectorsPerCluster)) {
+         return false;
+     }
+ 
+-    afatfs.fatStartSector = afatfs.partitionStartSector + volume->reservedSectorCount;
+-
+-    afatfs.sectorsPerCluster = volume->sectorsPerCluster;
+-    if (afatfs.sectorsPerCluster < 1 || afatfs.sectorsPerCluster > 128 || !isPowerOfTwo(afatfs.sectorsPerCluster)) {
++    const uint32_t fatSectors = volume->FATSize16 != 0 ? volume->FATSize16 : volume->fatDescriptor.fat32.FATSize32;
++    const uint32_t rootSectors = (volume->rootEntryCount * FAT_DIRECTORY_ENTRY_SIZE + AFATFS_SECTOR_SIZE - 1) / AFATFS_SECTOR_SIZE;
++    const uint32_t totalSectors = volume->totalSectors16 != 0 ? volume->totalSectors16 : volume->totalSectors32;
++    const uint64_t metadataSectors = volume->reservedSectorCount + (uint64_t)volume->numFATs * fatSectors + rootSectors;
++    if (fatSectors == 0 || totalSectors > sectorCount || metadataSectors >= totalSectors) {
+         return false;
+     }
+ 
+-    afatfs.byteInClusterMask = AFATFS_SECTOR_SIZE * afatfs.sectorsPerCluster - 1;
+-
+-    afatfs.fatSectors = volume->FATSize16 != 0 ? volume->FATSize16 : volume->fatDescriptor.fat32.FATSize32;
+-
+-    // Always zero on FAT32 since rootEntryCount is always zero (this is non-zero on FAT16)
+-    afatfs.rootDirectorySectors = ((volume->rootEntryCount * FAT_DIRECTORY_ENTRY_SIZE) + (volume->bytesPerSector - 1)) / volume->bytesPerSector;
+-    uint32_t totalSectors = volume->totalSectors16 != 0 ? volume->totalSectors16 : volume->totalSectors32;
+-    uint32_t dataSectors = totalSectors - (volume->reservedSectorCount + (AFATFS_NUM_FATS * afatfs.fatSectors) + afatfs.rootDirectorySectors);
+-
+-    afatfs.numClusters = dataSectors / volume->sectorsPerCluster;
++    const uint32_t numClusters = (totalSectors - (uint32_t)metadataSectors) / sectorsPerCluster;
++    if (numClusters <= FAT12_MAX_CLUSTERS || numClusters >= 0x0ffffff5) {
++        return false;
++    }
+ 
+-    if (afatfs.numClusters <= FAT12_MAX_CLUSTERS) {
+-        afatfs.filesystemType = FAT_FILESYSTEM_TYPE_FAT12;
++    const bool fat32 = numClusters > FAT16_MAX_CLUSTERS;
++    const uint32_t rootCluster = fat32 ? volume->fatDescriptor.fat32.rootCluster : 0;
++    const uint32_t entriesPerSector = fat32 ? AFATFS_FAT32_FAT_ENTRIES_PER_SECTOR : AFATFS_FAT16_FAT_ENTRIES_PER_SECTOR;
+ 
+-        return false; // FAT12 is not a supported filesystem
+-    } else if (afatfs.numClusters <= FAT16_MAX_CLUSTERS) {
+-        afatfs.filesystemType = FAT_FILESYSTEM_TYPE_FAT16;
+-    } else {
+-        afatfs.filesystemType = FAT_FILESYSTEM_TYPE_FAT32;
++    if ((uint64_t)fatSectors * entriesPerSector < (uint64_t)numClusters + FAT_SMALLEST_LEGAL_CLUSTER_NUMBER) {
++        return false;
+     }
+-
+-    if (afatfs.filesystemType == FAT_FILESYSTEM_TYPE_FAT32) {
+-        afatfs.rootDirectoryCluster = volume->fatDescriptor.fat32.rootCluster;
+-    } else {
+-        // FAT16 doesn't store the root directory in clusters
+-        afatfs.rootDirectoryCluster = 0;
++    if (fat32) {
++        if (volume->FATSize16 != 0 || volume->rootEntryCount != 0 || volume->fatDescriptor.fat32.fsVer != 0
++            || rootCluster < FAT_SMALLEST_LEGAL_CLUSTER_NUMBER || rootCluster > numClusters + 1) {
++            return false;
++        }
++    } else if (volume->FATSize16 == 0 || volume->rootEntryCount == 0) {
++        return false;
+     }
+ 
+-    uint32_t endOfFATs = afatfs.fatStartSector + AFATFS_NUM_FATS * afatfs.fatSectors;
+-
+-    afatfs.clusterStartSector = endOfFATs + afatfs.rootDirectorySectors;
+-
++    afatfs.filesystemType = fat32 ? FAT_FILESYSTEM_TYPE_FAT32 : FAT_FILESYSTEM_TYPE_FAT16;
++    afatfs.fatStartSector = startSector + volume->reservedSectorCount;
++    afatfs.fatSectors = fatSectors;
++    afatfs.sectorsPerCluster = sectorsPerCluster;
++    afatfs.byteInClusterMask = AFATFS_SECTOR_SIZE * sectorsPerCluster - 1;
++    afatfs.rootDirectorySectors = rootSectors;
++    afatfs.numClusters = numClusters;
++    afatfs.rootDirectoryCluster = rootCluster;
++    afatfs.clusterStartSector = startSector + (uint32_t)metadataSectors;
+     return true;
+ }
+ 
+@@ -3488,28 +3498,39 @@ static void afatfs_initContinue(void)
+     switch (afatfs.initPhase) {
+         case AFATFS_INITIALIZATION_READ_MBR:
+             if (afatfs_cacheSector(0, &sector, AFATFS_CACHE_READ | AFATFS_CACHE_DISCARDABLE, 0) == AFATFS_OPERATION_SUCCESS) {
+-                if (afatfs_parseMBR(sector)) {
++                const uint32_t diskSectors = sdcard_getMetadata()->numBlocks;
++                const bool bootJump = sector[0] == 0xeb || sector[0] == 0xe9 || sector[0] == 0xe8;
++                if (bootJump && afatfs_parseVolumeID(sector, 0, diskSectors)) {
++                    afatfs.initPhase = AFATFS_INITIALIZATION_OPEN_ROOT;
++                    goto doMore;
++                }
++                if (afatfs_parseMBR(sector, diskSectors)) {
+                     afatfs.initPhase = AFATFS_INITIALIZATION_READ_VOLUME_ID;
+                     goto doMore;
+-                } else {
+-                    afatfs.lastError = AFATFS_ERROR_BAD_MBR;
+-                    afatfs.filesystemState = AFATFS_FILESYSTEM_STATE_FATAL;
+                 }
++                afatfs.lastError = AFATFS_ERROR_BAD_MBR;
++                afatfs.filesystemState = AFATFS_FILESYSTEM_STATE_FATAL;
+             }
+-        break;
+-        case AFATFS_INITIALIZATION_READ_VOLUME_ID:
+-            if (afatfs_cacheSector(afatfs.partitionStartSector, &sector, AFATFS_CACHE_READ | AFATFS_CACHE_DISCARDABLE, 0) == AFATFS_OPERATION_SUCCESS) {
+-                if (afatfs_parseVolumeID(sector)) {
+-                    // Open the root directory
+-                    afatfs_chdir(NULL);
+-
+-                    afatfs.initPhase++;
+-                } else {
+-                    afatfs.lastError = AFATFS_ERROR_BAD_FILESYSTEM_HEADER;
+-                    afatfs.filesystemState = AFATFS_FILESYSTEM_STATE_FATAL;
++            break;
++        case AFATFS_INITIALIZATION_READ_VOLUME_ID: {
++            const afatfsPartition_t *partition = &afatfs.initState.partitionProbe.partitions[afatfs.initState.partitionProbe.index];
++            if (afatfs_cacheSector(partition->startSector, &sector, AFATFS_CACHE_READ | AFATFS_CACHE_DISCARDABLE, 0) == AFATFS_OPERATION_SUCCESS) {
++                if (afatfs_parseVolumeID(sector, partition->startSector, partition->sectorCount)) {
++                    afatfs.initPhase = AFATFS_INITIALIZATION_OPEN_ROOT;
++                    goto doMore;
++                }
++                if (++afatfs.initState.partitionProbe.index < afatfs.initState.partitionProbe.count) {
++                    goto doMore;
+                 }
++                afatfs.lastError = AFATFS_ERROR_BAD_FILESYSTEM_HEADER;
++                afatfs.filesystemState = AFATFS_FILESYSTEM_STATE_FATAL;
+             }
+-        break;
++            break;
++        }
++        case AFATFS_INITIALIZATION_OPEN_ROOT:
++            afatfs_chdir(NULL);
++            afatfs.initPhase++;
++            break;
+ 
+ #ifdef AFATFS_USE_FREEFILE
+         case AFATFS_INITIALIZATION_FREEFILE_CREATE:
 diff --git a/src/main/rx/sbus.c b/src/main/rx/sbus.c
 index f08267e..d951ad3 100644
 --- a/src/main/rx/sbus.c
