@@ -5,6 +5,13 @@
 #include <string.h>
 
 #define USE_MYBOX_SDMMC_RECOVERY
+#define MYBOXH743MINI
+#define USE_SD_TRANSCEIVER 0
+#define __IO volatile
+#define SDMMC_CHECK_PATTERN 0x1aaU
+#define SDMMC_HIGH_CAPACITY (1U << 30)
+#define SDMMC_CMD_CMDINDEX 0x3fU
+#define SDMMC_RESPCMD_RESPCMD 0x3fU
 #define SDMMC_CLK_DIV 4
 enum {
     SDMMC_CLOCK_EDGE_RISING, SDMMC_CLOCK_POWER_SAVE_DISABLE, SDMMC_BUS_WIDE_1B, SDMMC_BUS_WIDE_4B,
@@ -24,6 +31,7 @@ enum {
 };
 typedef struct {
     uint32_t STA, MASK, DCOUNT, DCTRL, IDMACTRL, IDMABASE0, ICR;
+    uint32_t CMD, RESPCMD, RESP1;
 } SDMMC_TypeDef;
 typedef struct {
     SDMMC_TypeDef *Instance;
@@ -113,7 +121,99 @@ static int HAL_SD_ReadBlocks(SD_HandleTypeDef *sd, uint8_t *buffer, uint32_t ind
     return HAL_OK;
 }
 
+static void delay(uint32_t ms) { assert(ms == 20); }
+
 #include "sd_startup.inc"
+
+enum {
+    HAL_SD_ERROR_NONE = 0, SDMMC_ERROR_NONE = 0, SDMMC_ERROR_CMD_RSP_TIMEOUT = 4,
+    SDMMC_ERROR_CMD_CRC_FAIL = 1, SDMMC_ERROR_TIMEOUT = HAL_SD_ERROR_TIMEOUT,
+    HAL_SD_ERROR_INVALID_VOLTRANGE = 1U << 24, SDMMC_RESP1 = 1,
+};
+static unsigned idleCount, appCount, ocrCount, delays, ocrReadyAfter;
+static uint32_t cmd8Error, cmd55Error, acmd41Error, r7, expectedOcr;
+
+static uint32_t SDMMC_CmdGoIdleState(SDMMC_TypeDef *reg)
+{
+    assert(reg == &instance);
+    ++idleCount;
+    return HAL_SD_ERROR_NONE;
+}
+
+static uint32_t SDMMC_CmdOperCond(SDMMC_TypeDef *reg)
+{
+    reg->RESP1 = r7;
+    return cmd8Error;
+}
+
+static uint32_t SDMMC_CmdAppCommand(SDMMC_TypeDef *reg, uint32_t argument)
+{
+    assert(reg == &instance && argument == 0);
+    ++appCount;
+    return cmd55Error;
+}
+
+static uint32_t SDMMC_CmdAppOperCommand(SDMMC_TypeDef *reg, uint32_t argument)
+{
+    assert(reg == &instance && argument == expectedOcr);
+    ++ocrCount;
+    reg->RESP1 = ocrCount >= ocrReadyAfter ? 0x80000000U | (argument & SDMMC_HIGH_CAPACITY) : 0;
+    return acmd41Error;
+}
+
+static uint32_t SDMMC_GetResponse(SDMMC_TypeDef *reg, uint32_t response)
+{
+    assert(response == SDMMC_RESP1);
+    return reg->RESP1;
+}
+
+static void HAL_Delay(uint32_t ms)
+{
+    assert(ms == 10);
+    ++delays;
+}
+
+#include "sd_power_on.inc"
+
+static void resetPowerOn(uint32_t cmd8, uint32_t cmd55, uint32_t acmd41)
+{
+    hsd.Instance = &instance;
+    idleCount = appCount = ocrCount = delays = 0;
+    cmd8Error = cmd8;
+    cmd55Error = cmd55;
+    acmd41Error = acmd41;
+    r7 = SDMMC_CHECK_PATTERN;
+    expectedOcr = 0x00ff8000U | (cmd8 == SDMMC_ERROR_NONE ? SDMMC_HIGH_CAPACITY : 0);
+    ocrReadyAfter = 3;
+}
+
+static void checkPowerOn(void)
+{
+    resetPowerOn(SDMMC_ERROR_CMD_RSP_TIMEOUT, 0, 0);
+    assert(SD_PowerON(&hsd) == 0 && idleCount == 2 && delays == 2 && appCount == 3);
+    assert(hsd.SdCard.CardVersion == CARD_V1_X && hsd.SdCard.CardType == CARD_SDSC);
+
+    resetPowerOn(0, 0, 0);
+    assert(SD_PowerON(&hsd) == 0 && idleCount == 1 && delays == 2 && appCount == 3);
+    assert(hsd.SdCard.CardVersion == CARD_V2_X && hsd.SdCard.CardType == CARD_SDHC_SDXC);
+
+    resetPowerOn(SDMMC_ERROR_CMD_CRC_FAIL, 0, 0);
+    assert(SD_PowerON(&hsd) == SDMMC_ERROR_CMD_CRC_FAIL && appCount == 0);
+
+    resetPowerOn(0, SDMMC_ERROR_CMD_RSP_TIMEOUT, 0);
+    assert(SD_PowerON(&hsd) == SDMMC_ERROR_CMD_RSP_TIMEOUT && ocrCount == 0);
+
+    resetPowerOn(0, 0, SDMMC_ERROR_CMD_RSP_TIMEOUT);
+    assert(SD_PowerON(&hsd) == SDMMC_ERROR_CMD_RSP_TIMEOUT && ocrCount == 1);
+
+    resetPowerOn(0, 0, 0);
+    r7 = 0xaa;
+    assert(SD_PowerON(&hsd) == HAL_SD_ERROR_INVALID_VOLTRANGE && appCount == 0);
+
+    resetPowerOn(0, 0, 0);
+    ocrReadyAfter = 101;
+    assert(SD_PowerON(&hsd) == HAL_SD_ERROR_TIMEOUT && delays == 100 && ocrCount == 100);
+}
 
 static void resetTest(enum fault primary, enum fault retry)
 {
@@ -128,6 +228,7 @@ static void resetTest(enum fault primary, enum fault retry)
 
 int main(void)
 {
+    checkPowerOn();
     resetTest(OK, OK);
     assert(SD_Init() == SD_OK && attempts == 1 && probes == 1 && wideSwitches == 1);
     assert(dividers[0] == 4 && SD_GetDiagnostics().busWidth == 4);

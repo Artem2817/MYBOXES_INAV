@@ -381,10 +381,10 @@ index f763775..25e1749 100644
      }
  }
 diff --git a/src/main/drivers/sdcard/sdmmc_sdio.h b/src/main/drivers/sdcard/sdmmc_sdio.h
-index 4c4e60c..12ac253 100644
+index 4c4e60c..d745ffd 100644
 --- a/src/main/drivers/sdcard/sdmmc_sdio.h
 +++ b/src/main/drivers/sdcard/sdmmc_sdio.h
-@@ -211,6 +211,44 @@ void             SD_Initialize_LL            (DMA_t dma);
+@@ -211,6 +211,48 @@ void             SD_Initialize_LL            (DMA_t dma);
  bool             SD_Initialize_LL            (DMA_t dma);
  #endif
  bool SD_Init(void);
@@ -404,6 +404,10 @@ index 4c4e60c..12ac253 100644
 +typedef struct {
 +    const char *startupFailure;
 +    uint32_t startupError;
++    uint32_t startupCommand;
++    uint32_t startupResponseCommand;
++    uint32_t startupResponse;
++    uint32_t startupStatus;
 +    uint32_t transferError;
 +    uint8_t busWidth;
 +    uint32_t attempts;
@@ -430,10 +434,10 @@ index 4c4e60c..12ac253 100644
  bool SD_GetState(void);
  
 diff --git a/src/main/drivers/sdcard/sdmmc_sdio_hal.c b/src/main/drivers/sdcard/sdmmc_sdio_hal.c
-index a0813bd..9397948 100644
+index a0813bd..f77fa1b 100644
 --- a/src/main/drivers/sdcard/sdmmc_sdio_hal.c
 +++ b/src/main/drivers/sdcard/sdmmc_sdio_hal.c
-@@ -59,6 +59,24 @@ static SD_Handle_t SD_Handle;
+@@ -59,6 +59,28 @@ static SD_Handle_t SD_Handle;
  static DMA_HandleTypeDef sd_dma;
  static SD_HandleTypeDef hsd;
  
@@ -452,13 +456,17 @@ index a0813bd..9397948 100644
 +{
 +    sdDiagnostics.startupFailure = phase;
 +    sdDiagnostics.startupError = error;
++    sdDiagnostics.startupCommand = hsd.Instance->CMD & SDMMC_CMD_CMDINDEX;
++    sdDiagnostics.startupResponseCommand = hsd.Instance->RESPCMD & SDMMC_RESPCMD_RESPCMD;
++    sdDiagnostics.startupResponse = hsd.Instance->RESP1;
++    sdDiagnostics.startupStatus = hsd.Instance->STA;
 +}
 +#endif
 +
  typedef struct sdioPin_s {
      ioTag_t pin;
      uint8_t af;
-@@ -75,6 +93,11 @@ typedef struct sdioPin_s {
+@@ -75,6 +97,11 @@ typedef struct sdioPin_s {
  #define SDIO_MAX_PINDEFS 2
  
  #define IOCFG_SDMMC       IO_CONFIG(GPIO_MODE_AF_PP, GPIO_SPEED_FREQ_VERY_HIGH, GPIO_NOPULL)
@@ -470,7 +478,7 @@ index a0813bd..9397948 100644
  
  #ifdef STM32F7
  #define SDMMC_CLK_DIV SDMMC_TRANSFER_CLK_DIV
-@@ -161,6 +184,101 @@ static const sdioHardware_t sdioPinHardware[SDIODEV_COUNT] = {
+@@ -161,6 +188,101 @@ static const sdioHardware_t sdioPinHardware[SDIODEV_COUNT] = {
  static const sdioHardware_t *sdioHardware;
  static sdioPin_t sdioPin[SDIO_PIN_COUNT];
  
@@ -572,7 +580,7 @@ index a0813bd..9397948 100644
  void sdioPinConfigure(void)
  {
      if (SDCARD_SDIO_DEVICE == SDIOINVALID) {
-@@ -260,13 +378,13 @@ void HAL_SD_MspInit(SD_HandleTypeDef* hsd)
+@@ -260,13 +382,13 @@ void HAL_SD_MspInit(SD_HandleTypeDef* hsd)
      const IO_t d3 = IOGetByTag(sdioPin[SDIO_PIN_D3].pin);
  
      IOConfigGPIOAF(clk, IOCFG_SDMMC, sdioPin[SDIO_PIN_CK].af);
@@ -591,7 +599,7 @@ index a0813bd..9397948 100644
  #endif
  
  #ifdef STM32F7
-@@ -312,18 +430,37 @@ bool SD_Initialize_LL(DMA_t dma)
+@@ -312,18 +434,37 @@ bool SD_Initialize_LL(DMA_t dma)
  bool SD_GetState(void)
  {
      HAL_SD_CardStateTypedef cardState = HAL_SD_GetCardState(&hsd);
@@ -631,7 +639,7 @@ index a0813bd..9397948 100644
  
      // drastically increases the time to respond from the sdcard
      // lets leave it off
-@@ -333,22 +470,38 @@ bool SD_Init(void)
+@@ -333,22 +474,38 @@ bool SD_Init(void)
  #endif
      hsd.Init.BusWide = SDMMC_BUS_WIDE_1B;
      hsd.Init.HardwareFlowControl = SDMMC_HARDWARE_FLOW_CONTROL_ENABLE;
@@ -677,7 +685,7 @@ index a0813bd..9397948 100644
      switch(hsd.SdCard.CardType) {
      case CARD_SDSC:
          switch (hsd.SdCard.CardVersion) {
-@@ -359,7 +512,10 @@ bool SD_Init(void)
+@@ -359,7 +516,10 @@ bool SD_Init(void)
              SD_CardType = SD_STD_CAPACITY_V2_0;
              break;
          default:
@@ -689,7 +697,7 @@ index a0813bd..9397948 100644
          }
          break;
  
-@@ -368,7 +524,10 @@ bool SD_Init(void)
+@@ -368,7 +528,10 @@ bool SD_Init(void)
          break;
  
      default:
@@ -701,7 +709,7 @@ index a0813bd..9397948 100644
      }
  
      // STATIC_ASSERT(sizeof(SD_Handle.CSD) == sizeof(hsd.CSD), hal-csd-size-error);
-@@ -377,7 +536,55 @@ bool SD_Init(void)
+@@ -377,7 +540,56 @@ bool SD_Init(void)
      // STATIC_ASSERT(sizeof(SD_Handle.CID) == sizeof(hsd.CID), hal-cid-size-error);
      memcpy(&SD_Handle.CID, &hsd.CID, sizeof(SD_Handle.CID));
  
@@ -740,6 +748,7 @@ index a0813bd..9397948 100644
 +
 +        // Retry once before starting Blackbox, with only DAT0 and a lower bus clock.
 +        sdDiagnostics.busWidth = 1;
++        delay(20);
 +        return !(sdInitCard(SDMMC_CLK_DIV * 2U, false) && sdReadStartupBlock());
 +    }
 +
@@ -758,7 +767,7 @@ index a0813bd..9397948 100644
  }
  
  SD_Error_t SD_GetCardInfo(void)
-@@ -582,11 +789,27 @@ SD_Error_t SD_GetCardInfo(void)
+@@ -582,11 +794,27 @@ SD_Error_t SD_GetCardInfo(void)
  }
  
  SD_Error_t SD_CheckWrite(void) {
@@ -786,7 +795,7 @@ index a0813bd..9397948 100644
      if (SD_Handle.RXCplt != 0) return SD_BUSY;
      return SD_OK;
  }
-@@ -594,8 +817,6 @@ SD_Error_t SD_CheckRead(void) {
+@@ -594,8 +822,6 @@ SD_Error_t SD_CheckRead(void) {
  SD_Error_t SD_WriteBlocks_DMA(uint64_t WriteAddress, uint32_t *buffer, uint32_t BlockSize, uint32_t NumberOfBlocks)
  {
      SD_Error_t ErrorState = SD_OK;
@@ -795,7 +804,7 @@ index a0813bd..9397948 100644
      if (BlockSize != 512) {
          return SD_ERROR; // unsupported.
      }
-@@ -617,9 +838,20 @@ SD_Error_t SD_WriteBlocks_DMA(uint64_t WriteAddress, uint32_t *buffer, uint32_t
+@@ -617,9 +843,20 @@ SD_Error_t SD_WriteBlocks_DMA(uint64_t WriteAddress, uint32_t *buffer, uint32_t
          }
      }
  #endif
@@ -816,7 +825,7 @@ index a0813bd..9397948 100644
  
      return ErrorState;
  }
-@@ -646,8 +878,6 @@ SD_Error_t SD_ReadBlocks_DMA(uint64_t ReadAddress, uint32_t *buffer, uint32_t Bl
+@@ -646,8 +883,6 @@ SD_Error_t SD_ReadBlocks_DMA(uint64_t ReadAddress, uint32_t *buffer, uint32_t Bl
      }
  #endif
  
@@ -825,7 +834,7 @@ index a0813bd..9397948 100644
      sdReadParameters.buffer = buffer;
      sdReadParameters.BlockSize = BlockSize;
      sdReadParameters.NumberOfBlocks = NumberOfBlocks;
-@@ -660,9 +890,21 @@ SD_Error_t SD_ReadBlocks_DMA(uint64_t ReadAddress, uint32_t *buffer, uint32_t Bl
+@@ -660,9 +895,21 @@ SD_Error_t SD_ReadBlocks_DMA(uint64_t ReadAddress, uint32_t *buffer, uint32_t Bl
          }
      }
  #endif
@@ -847,7 +856,7 @@ index a0813bd..9397948 100644
  
      return ErrorState;
  }
-@@ -698,6 +940,14 @@ void HAL_SD_RxCpltCallback(SD_HandleTypeDef *hsd)
+@@ -698,6 +945,14 @@ void HAL_SD_RxCpltCallback(SD_HandleTypeDef *hsd)
      SCB_InvalidateDCache_by_Addr((uint32_t*)alignedAddr, sdReadParameters.NumberOfBlocks * sdReadParameters.BlockSize + ((uint32_t)sdReadParameters.buffer - alignedAddr));
  }
  
@@ -862,7 +871,7 @@ index a0813bd..9397948 100644
  void HAL_SD_AbortCallback(SD_HandleTypeDef *hsd)
  {
      UNUSED(hsd);
-@@ -708,12 +958,20 @@ void HAL_SD_AbortCallback(SD_HandleTypeDef *hsd)
+@@ -708,12 +963,20 @@ void HAL_SD_AbortCallback(SD_HandleTypeDef *hsd)
  
  void SDMMC1_IRQHandler(void)
  {
@@ -884,7 +893,7 @@ index a0813bd..9397948 100644
  
  #endif
 diff --git a/src/main/fc/cli.c b/src/main/fc/cli.c
-index 9bb2c77..d52b6dc 100644
+index 9bb2c77..3dba470 100644
 --- a/src/main/fc/cli.c
 +++ b/src/main/fc/cli.c
 @@ -24,6 +24,9 @@
@@ -918,7 +927,7 @@ index 9bb2c77..d52b6dc 100644
  
  // sync this with sensors_e
  static const char * const sensorTypeNames[] = {
-@@ -2857,6 +2865,33 @@ static void cliSdInfo(char *cmdline)
+@@ -2857,6 +2865,38 @@ static void cliSdInfo(char *cmdline)
  {
      UNUSED(cmdline);
  
@@ -928,9 +937,14 @@ index 9bb2c77..d52b6dc 100644
 +        return;
 +    }
 +    const sdmmcDiagnostics_t diagnostics = SD_GetDiagnostics();
-+    cliPrintLinef("SDMMC r9: %u-bit, init attempts %u, polling init %s (0x%08x)",
++    cliPrintLinef("SDMMC: %u-bit, init attempts %u, polling init %s (0x%08x)",
 +        diagnostics.busWidth, (unsigned)diagnostics.attempts,
 +        diagnostics.startupFailure ? diagnostics.startupFailure : "OK", (unsigned)diagnostics.startupError);
++    if (diagnostics.startupFailure) {
++        cliPrintLinef("Init registers: CMD%u RESPCMD=%u RESP1=%08x STA=%08x",
++            (unsigned)diagnostics.startupCommand, (unsigned)diagnostics.startupResponseCommand,
++            (unsigned)diagnostics.startupResponse, (unsigned)diagnostics.startupStatus);
++    }
 +    cliPrintLinef("Card: type %u, %u blocks, RCA 0x%04x, CMD13 state %u, R1 0x%08x, error 0x%08x",
 +        (unsigned)diagnostics.cardType, (unsigned)diagnostics.blocks, (unsigned)diagnostics.rca,
 +        (unsigned)diagnostics.cardState, (unsigned)diagnostics.cardResponse, (unsigned)diagnostics.cardError);
@@ -952,7 +966,7 @@ index 9bb2c77..d52b6dc 100644
      cliPrint("SD card: ");
  
      if (!sdcard_isInserted()) {
-@@ -2865,7 +2900,13 @@ static void cliSdInfo(char *cmdline)
+@@ -2865,7 +2905,13 @@ static void cliSdInfo(char *cmdline)
      }
  
      if (!sdcard_isInitialized()) {
@@ -966,7 +980,7 @@ index 9bb2c77..d52b6dc 100644
          return;
      }
  
-@@ -2897,7 +2938,7 @@ static void cliSdInfo(char *cmdline)
+@@ -2897,7 +2943,7 @@ static void cliSdInfo(char *cmdline)
  
              switch (afatfs_getLastError()) {
                  case AFATFS_ERROR_BAD_MBR:
@@ -975,7 +989,7 @@ index 9bb2c77..d52b6dc 100644
                  break;
                  case AFATFS_ERROR_BAD_FILESYSTEM_HEADER:
                      cliPrint(" - bad FAT header");
-@@ -4144,6 +4185,26 @@ static void cliStatus(char *cmdline)
+@@ -4144,6 +4190,26 @@ static void cliStatus(char *cmdline)
  #endif // for if at32
  #endif // for SITL
  

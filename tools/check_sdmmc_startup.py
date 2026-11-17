@@ -15,10 +15,15 @@ transfer = source[source.index("#define SDMMC_TRANSFER_ERRORS"):source.index("vo
 transfer = transfer[:transfer.rindex("#endif")]
 startup = source[source.index("static bool sdInitCard("):source.index("SD_Error_t SD_GetCardInfo(void)")]
 
+hal = Path(sys.argv[1]).resolve() / "lib/main/STM32H7/Drivers/STM32H7xx_HAL_Driver/Src/stm32h7xx_hal_sd.c"
+power_on = hal.read_text().split("static uint32_t SD_PowerON(SD_HandleTypeDef *hsd)\n{", 1)[1]
+power_on = "static uint32_t SD_PowerON(SD_HandleTypeDef *hsd)\n{" + power_on.split("\n}", 1)[0] + "\n}\n"
+
 with tempfile.TemporaryDirectory() as folder:
     work = Path(folder)
     (work / "sd_types.inc").write_text(types)
     (work / "sd_startup.inc").write_text(diagnostics + transfer + startup)
+    (work / "sd_power_on.inc").write_text(power_on)
     binary = work / "check"
     subprocess.run(
         ["gcc", "-std=gnu11", "-Wall", "-Wextra", "-Werror", "-I", str(work),
@@ -26,4 +31,4 @@ with tempfile.TemporaryDirectory() as folder:
         check=True,
     )
     subprocess.run([str(binary)], check=True, timeout=10)
-print("SDMMC: startup and fallback, DMA completion with and without IRQ, hardware faults and timeout snapshots: OK")
+print("SDMMC: CMD8/ACMD41 startup, fallback, DMA completion with and without IRQ, hardware faults and timeout snapshots: OK")

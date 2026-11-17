@@ -1,0 +1,83 @@
+diff --git a/lib/main/STM32H7/Drivers/STM32H7xx_HAL_Driver/Src/stm32h7xx_hal_sd.c b/lib/main/STM32H7/Drivers/STM32H7xx_HAL_Driver/Src/stm32h7xx_hal_sd.c
+index ae33c68..897a306 100644
+--- a/lib/main/STM32H7/Drivers/STM32H7xx_HAL_Driver/Src/stm32h7xx_hal_sd.c
++++ b/lib/main/STM32H7/Drivers/STM32H7xx_HAL_Driver/Src/stm32h7xx_hal_sd.c
+@@ -3134,7 +3134,6 @@ static uint32_t SD_PowerON(SD_HandleTypeDef *hsd)
+ {
+   __IO uint32_t count = 0U;
+   uint32_t response = 0U;
+-  uint32_t validvoltage = 0U;
+   uint32_t errorstate;
+ #if (USE_SD_TRANSCEIVER != 0U)
+   uint32_t tickstart = HAL_GetTick();
+@@ -3147,6 +3146,61 @@ static uint32_t SD_PowerON(SD_HandleTypeDef *hsd)
+     return errorstate;
+   }
+ 
++#if defined(MYBOXH743MINI) || defined(MYBOXH743MINIV2) || defined(MYBOXH743MINIV2VIB_BENCH)
++  /* SD v1 cards leave CMD8 unanswered. The controller reports a command-response timeout. */
++  errorstate = SDMMC_CmdOperCond(hsd->Instance);
++  uint32_t ocr = 0x00FF8000U; /* 2.7-3.6 V, with no 1.8 V switching on MYBOX. */
++  if (errorstate == SDMMC_ERROR_NONE)
++  {
++    if ((SDMMC_GetResponse(hsd->Instance, SDMMC_RESP1) & 0xFFFU) != SDMMC_CHECK_PATTERN)
++    {
++      return HAL_SD_ERROR_INVALID_VOLTRANGE;
++    }
++    hsd->SdCard.CardVersion = CARD_V2_X;
++    ocr |= SDMMC_HIGH_CAPACITY;
++  }
++  else if (errorstate == SDMMC_ERROR_CMD_RSP_TIMEOUT || errorstate == SDMMC_ERROR_TIMEOUT)
++  {
++    hsd->SdCard.CardVersion = CARD_V1_X;
++    errorstate = SDMMC_CmdGoIdleState(hsd->Instance);
++    if (errorstate != HAL_SD_ERROR_NONE)
++    {
++      return errorstate;
++    }
++  }
++  else
++  {
++    return errorstate;
++  }
++
++  /* Poll the card's operating conditions at 10 ms intervals, as in ChibiOS. */
++  for (count = 0; count < 100U; ++count)
++  {
++    errorstate = SDMMC_CmdAppCommand(hsd->Instance, 0);
++    if (errorstate != HAL_SD_ERROR_NONE)
++    {
++      return errorstate;
++    }
++    errorstate = SDMMC_CmdAppOperCommand(hsd->Instance, ocr);
++    if (errorstate != HAL_SD_ERROR_NONE)
++    {
++      return errorstate;
++    }
++
++    response = SDMMC_GetResponse(hsd->Instance, SDMMC_RESP1);
++    if ((response & 0x80000000U) != 0U)
++    {
++      break;
++    }
++
++    HAL_Delay(10U);
++  }
++  if (count == 100U)
++  {
++    return HAL_SD_ERROR_TIMEOUT;
++  }
++#else
++  __IO uint32_t validvoltage = 0U;
+   /* CMD8: SEND_IF_COND: Command available only on V2.0 cards */
+   errorstate = SDMMC_CmdOperCond(hsd->Instance);
+   if (errorstate == SDMMC_ERROR_TIMEOUT) /* No response to CMD8 */
+@@ -3207,6 +3261,8 @@ static uint32_t SD_PowerON(SD_HandleTypeDef *hsd)
+     return HAL_SD_ERROR_INVALID_VOLTRANGE;
+   }
+ 
++#endif
++
+   /* Set default card type */
+   hsd->SdCard.CardType = CARD_SDSC;
+ 
