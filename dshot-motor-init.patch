@@ -1,0 +1,12 @@
+--- a/src/main/drivers/pwm_output.c
++++ b/src/main/drivers/pwm_output.c
+@@ -681,7 +681,8 @@
+         break;
+     }
+ 
+-    return (motors[motorIndex].pwmPort != NULL);
++    const pwmOutputPort_t *port = motors[motorIndex].pwmPort;
++    return port && port->configured;
+ }
+ 
+ // Helper function for ESC passthrough

@@ -267,19 +267,30 @@ index c5272cc..5749db6 100644
      }
  
 diff --git a/src/main/drivers/sdcard/sdcard_sdio.c b/src/main/drivers/sdcard/sdcard_sdio.c
-index f763775..d6f2920 100644
+index f763775..25e1749 100644
 --- a/src/main/drivers/sdcard/sdcard_sdio.c
 +++ b/src/main/drivers/sdcard/sdcard_sdio.c
-@@ -134,7 +134,7 @@ static sdcardReceiveBlockStatus_e sdcard_receiveDataBlock(uint8_t *buffer, int c
+@@ -134,10 +134,18 @@ static sdcardReceiveBlockStatus_e sdcard_receiveDataBlock(uint8_t *buffer, int c
          return SDCARD_RECEIVE_BLOCK_IN_PROGRESS;
      }
  
 -    if (SD_GetState() != true) {
-+    if (ret != SD_OK || !SD_GetState()) {
++    if (ret != SD_OK) {
          return SDCARD_RECEIVE_ERROR;
      }
  
-@@ -291,9 +291,9 @@ static bool sdcardSdio_poll(void)
++    if (!SD_GetState()) {
++#ifdef USE_MYBOX_SDMMC_RECOVERY
++        return SDCARD_RECEIVE_BLOCK_IN_PROGRESS;
++#else
++        return SDCARD_RECEIVE_ERROR;
++#endif
++    }
++
+     return SDCARD_RECEIVE_SUCCESS;
+ }
+ 
+@@ -291,9 +299,9 @@ static bool sdcardSdio_poll(void)
                  goto doMore;
              } // else keep waiting for the CID to arrive
          break;
@@ -292,12 +303,15 @@ index f763775..d6f2920 100644
  
                  // The SD card is now busy committing that write to the card
                  sdcard.state = SDCARD_STATE_WAITING_FOR_WRITE;
-@@ -303,8 +303,17 @@ static bool sdcardSdio_poll(void)
+@@ -303,8 +311,20 @@ static bool sdcardSdio_poll(void)
                  if (sdcard.pendingOperation.callback) {
                      sdcard.pendingOperation.callback(SDCARD_BLOCK_OPERATION_WRITE, sdcard.pendingOperation.blockIndex, sdcard.pendingOperation.buffer, sdcard.pendingOperation.callbackData);
                  }
 +#ifdef USE_MYBOX_SDMMC_RECOVERY
 +            } else if (status != SD_BUSY || millis() - sdcard.operationStartTime > SDCARD_TIMEOUT_WRITE_MSEC) {
++                if (status == SD_BUSY) {
++                    SD_RecordFailure("write DMA timeout", true);
++                }
 +                if (sdcard.pendingOperation.callback) {
 +                    sdcard.pendingOperation.callback(SDCARD_BLOCK_OPERATION_WRITE, sdcard.pendingOperation.blockIndex,
 +                        NULL, sdcard.pendingOperation.callbackData);
@@ -311,7 +325,37 @@ index f763775..d6f2920 100644
          case SDCARD_STATE_WAITING_FOR_WRITE:
              if (SD_GetState()) {
                  sdcard.failureCount = 0; // Assume the card is good if it can complete a write
-@@ -482,6 +491,9 @@ static sdcardOperationStatus_e sdcardSdio_writeBlock(uint32_t blockIndex, uint8_
+@@ -329,6 +349,9 @@ static bool sdcardSdio_poll(void)
+                  * their buffer and have no hope of retrying the operation. But this should be very rare and it allows
+                  * them to reuse their buffer milliseconds faster than they otherwise would.
+                  */
++#ifdef USE_MYBOX_SDMMC_RECOVERY
++                SD_RecordFailure("write CMD13 timeout", true);
++#endif
+                 sdcardSdio_reset();
+                 goto doMore;
+             }
+@@ -353,6 +376,9 @@ static bool sdcardSdio_poll(void)
+                     if (millis() <= sdcard.operationStartTime + SDCARD_TIMEOUT_READ_MSEC) {
+                         break; // Timeout not reached yet so keep waiting
+                     }
++#ifdef USE_MYBOX_SDMMC_RECOVERY
++                    SD_RecordFailure(SD_CheckRead() == SD_OK ? "read CMD13 timeout" : "read DMA timeout", true);
++#endif
+                     // Timeout has expired, so fall through to convert to a fatal error
+                     FALLTHROUGH;
+ 
+@@ -388,6 +414,9 @@ static bool sdcardSdio_poll(void)
+     // Is the card's initialization taking too long?
+     if (sdcard.state >= SDCARD_STATE_RESET && sdcard.state < SDCARD_STATE_READY
+             && millis() - sdcard.operationStartTime > SDCARD_TIMEOUT_INIT_MILLIS) {
++#ifdef USE_MYBOX_SDMMC_RECOVERY
++        SD_RecordFailure("card readiness timeout", true);
++#endif
+         sdcardSdio_reset();
+     }
+ 
+@@ -482,6 +511,9 @@ static sdcardOperationStatus_e sdcardSdio_writeBlock(uint32_t blockIndex, uint8_
  
      // DMA started successfully - only set state after confirming operation will proceed
      sdcard.state = SDCARD_STATE_SENDING_WRITE;
@@ -321,7 +365,7 @@ index f763775..d6f2920 100644
  
      // Success - reset retry counter
      sdcard.operationRetries = 0;
-@@ -575,14 +587,6 @@ static bool sdcardSdio_readBlock(uint32_t blockIndex, uint8_t *buffer, sdcard_op
+@@ -575,14 +607,6 @@ static bool sdcardSdio_readBlock(uint32_t blockIndex, uint8_t *buffer, sdcard_op
          // Max retries exceeded, reset card
          sdcard.operationRetries = 0;
          sdcardSdio_reset();
@@ -337,63 +381,84 @@ index f763775..d6f2920 100644
      }
  }
 diff --git a/src/main/drivers/sdcard/sdmmc_sdio.h b/src/main/drivers/sdcard/sdmmc_sdio.h
-index 4c4e60c..a4a582d 100644
+index 4c4e60c..12ac253 100644
 --- a/src/main/drivers/sdcard/sdmmc_sdio.h
 +++ b/src/main/drivers/sdcard/sdmmc_sdio.h
-@@ -211,6 +211,16 @@ void             SD_Initialize_LL            (DMA_t dma);
+@@ -211,6 +211,44 @@ void             SD_Initialize_LL            (DMA_t dma);
  bool             SD_Initialize_LL            (DMA_t dma);
  #endif
  bool SD_Init(void);
 +#ifdef USE_MYBOX_SDMMC_RECOVERY
 +typedef struct {
++    const char *phase;
++    uint32_t error;
++    uint32_t sector;
++    uint32_t status;
++    uint32_t mask;
++    uint32_t dataCount;
++    uint32_t dataControl;
++    uint32_t dmaControl;
++    uint32_t dmaAddress;
++} sdmmcFailure_t;
++
++typedef struct {
 +    const char *startupFailure;
 +    uint32_t startupError;
 +    uint32_t transferError;
 +    uint8_t busWidth;
++    uint32_t attempts;
++    uint32_t cardType;
++    uint32_t blocks;
++    uint32_t rca;
++    uint32_t cardState;
++    uint32_t cardResponse;
++    uint32_t cardError;
++    uint16_t bootSignature;
++    uint32_t bootPartitionTypes;
++    uint32_t reads;
++    uint32_t writes;
++    uint32_t irqCompletions;
++    uint32_t polledCompletions;
++    uint32_t failures;
++    sdmmcFailure_t firstFailure;
 +} sdmmcDiagnostics_t;
 +
 +sdmmcDiagnostics_t SD_GetDiagnostics(void);
++void SD_RecordFailure(const char *phase, bool timeout);
 +#endif
  bool SD_IsDetected(void);
  bool SD_GetState(void);
  
 diff --git a/src/main/drivers/sdcard/sdmmc_sdio_hal.c b/src/main/drivers/sdcard/sdmmc_sdio_hal.c
-index a0813bd..88d7ce6 100644
+index a0813bd..9397948 100644
 --- a/src/main/drivers/sdcard/sdmmc_sdio_hal.c
 +++ b/src/main/drivers/sdcard/sdmmc_sdio_hal.c
-@@ -59,6 +59,31 @@ static SD_Handle_t SD_Handle;
+@@ -59,6 +59,24 @@ static SD_Handle_t SD_Handle;
  static DMA_HandleTypeDef sd_dma;
  static SD_HandleTypeDef hsd;
  
 +#ifdef USE_MYBOX_SDMMC_RECOVERY
-+static const char *sdStartupFailure;
-+static uint32_t sdStartupError;
-+static volatile uint32_t sdTransferError;
++static sdmmcDiagnostics_t sdDiagnostics = { .busWidth = 4 };
 +static volatile bool sdTransferFailed;
-+static uint8_t sdBusWidth = 4;
 +static bool sdStartupProbeDone;
++static uint32_t sdTransferSector;
 +
 +sdmmcDiagnostics_t SD_GetDiagnostics(void)
 +{
-+    return (sdmmcDiagnostics_t){
-+        .startupFailure = sdStartupFailure,
-+        .startupError = sdStartupError,
-+        .transferError = sdTransferError,
-+        .busWidth = sdBusWidth,
-+    };
++    return sdDiagnostics;
 +}
 +
 +static void sdSetStartupFailure(const char *phase, uint32_t error)
 +{
-+    sdStartupFailure = phase;
-+    sdStartupError = error;
++    sdDiagnostics.startupFailure = phase;
++    sdDiagnostics.startupError = error;
 +}
 +#endif
 +
  typedef struct sdioPin_s {
      ioTag_t pin;
      uint8_t af;
-@@ -75,6 +100,11 @@ typedef struct sdioPin_s {
+@@ -75,6 +93,11 @@ typedef struct sdioPin_s {
  #define SDIO_MAX_PINDEFS 2
  
  #define IOCFG_SDMMC       IO_CONFIG(GPIO_MODE_AF_PP, GPIO_SPEED_FREQ_VERY_HIGH, GPIO_NOPULL)
@@ -405,7 +470,109 @@ index a0813bd..88d7ce6 100644
  
  #ifdef STM32F7
  #define SDMMC_CLK_DIV SDMMC_TRANSFER_CLK_DIV
-@@ -260,13 +290,13 @@ void HAL_SD_MspInit(SD_HandleTypeDef* hsd)
+@@ -161,6 +184,101 @@ static const sdioHardware_t sdioPinHardware[SDIODEV_COUNT] = {
+ static const sdioHardware_t *sdioHardware;
+ static sdioPin_t sdioPin[SDIO_PIN_COUNT];
+ 
++#ifdef USE_MYBOX_SDMMC_RECOVERY
++#define SDMMC_TRANSFER_ERRORS (SDMMC_FLAG_IDMATE | SDMMC_FLAG_DCRCFAIL | SDMMC_FLAG_DTIMEOUT | \
++    SDMMC_FLAG_RXOVERR | SDMMC_FLAG_TXUNDERR)
++#define SDMMC_TRANSFER_EVENTS (SDMMC_TRANSFER_ERRORS | SDMMC_FLAG_DATAEND)
++
++static void sdCaptureFailure(const char *phase, uint32_t error, uint32_t status)
++{
++    sdDiagnostics.transferError = error;
++    ++sdDiagnostics.failures;
++    if (!sdDiagnostics.firstFailure.phase) {
++        const SDMMC_TypeDef *instance = hsd.Instance;
++        sdDiagnostics.firstFailure = (sdmmcFailure_t){
++            .phase = phase,
++            .error = error,
++            .sector = sdTransferSector,
++            .status = status,
++            .mask = instance->MASK,
++            .dataCount = instance->DCOUNT,
++            .dataControl = instance->DCTRL,
++            .dmaControl = instance->IDMACTRL,
++            .dmaAddress = instance->IDMABASE0,
++        };
++    }
++}
++
++void SD_RecordFailure(const char *phase, bool timeout)
++{
++    if (hsd.Instance && !sdTransferFailed) {
++        const uint32_t error = timeout ? HAL_SD_ERROR_TIMEOUT : HAL_SD_GetError(&hsd);
++        sdCaptureFailure(phase, error, hsd.Instance->STA);
++    }
++}
++
++static void sdServiceTransfer(bool fromIrq)
++{
++    if ((!SD_Handle.RXCplt && !SD_Handle.TXCplt) || sdTransferFailed) {
++        return;
++    }
++
++    const uint32_t status = hsd.Instance->STA;
++    if (status & SDMMC_TRANSFER_ERRORS) {
++        uint32_t error = 0;
++        if (status & SDMMC_FLAG_IDMATE) {
++            error |= HAL_SD_ERROR_DMA;
++        }
++        if (status & SDMMC_FLAG_DCRCFAIL) {
++            error |= HAL_SD_ERROR_DATA_CRC_FAIL;
++        }
++        if (status & SDMMC_FLAG_DTIMEOUT) {
++            error |= HAL_SD_ERROR_DATA_TIMEOUT;
++        }
++        if (status & SDMMC_FLAG_RXOVERR) {
++            error |= HAL_SD_ERROR_RX_OVERRUN;
++        }
++        if (status & SDMMC_FLAG_TXUNDERR) {
++            error |= HAL_SD_ERROR_TX_UNDERRUN;
++        }
++        sdCaptureFailure(SD_Handle.RXCplt ? "read hardware error" : "write hardware error", error, status);
++        sdTransferFailed = true;
++        // Keep the error snapshot and let the SD state machine reset the peripheral.
++        hsd.Instance->MASK = 0;
++        return;
++    }
++
++    if (status & SDMMC_FLAG_DATAEND) {
++        if (fromIrq) {
++            ++sdDiagnostics.irqCompletions;
++        } else {
++            ++sdDiagnostics.polledCompletions;
++        }
++        HAL_SD_IRQHandler(&hsd);
++    }
++}
++
++static void sdPollTransfer(void)
++{
++    if (!(hsd.Instance->STA & SDMMC_TRANSFER_EVENTS)) {
++        return;
++    }
++
++    // The IRQ can run between the flag check and disabling it. Recheck under the lock.
++    HAL_NVIC_DisableIRQ(sdioHardware->irqn);
++    sdServiceTransfer(false);
++    HAL_NVIC_EnableIRQ(sdioHardware->irqn);
++}
++
++static void sdPrepareTransfer(uint32_t sector)
++{
++    sdTransferFailed = false;
++    sdTransferSector = sector;
++    hsd.Instance->ICR = SDMMC_STATIC_DATA_FLAGS;
++    hsd.Instance->DCTRL = SDMMC_DCTRL_FIFORST;
++}
++#endif
++
+ void sdioPinConfigure(void)
+ {
+     if (SDCARD_SDIO_DEVICE == SDIOINVALID) {
+@@ -260,13 +378,13 @@ void HAL_SD_MspInit(SD_HandleTypeDef* hsd)
      const IO_t d3 = IOGetByTag(sdioPin[SDIO_PIN_D3].pin);
  
      IOConfigGPIOAF(clk, IOCFG_SDMMC, sdioPin[SDIO_PIN_CK].af);
@@ -424,7 +591,18 @@ index a0813bd..88d7ce6 100644
  #endif
  
  #ifdef STM32F7
-@@ -316,14 +346,25 @@ bool SD_GetState(void)
+@@ -312,18 +430,37 @@ bool SD_Initialize_LL(DMA_t dma)
+ bool SD_GetState(void)
+ {
+     HAL_SD_CardStateTypedef cardState = HAL_SD_GetCardState(&hsd);
++#ifdef USE_MYBOX_SDMMC_RECOVERY
++    sdDiagnostics.cardState = cardState;
++    sdDiagnostics.cardResponse = hsd.Instance->RESP1;
++    if (cardState == 0) {
++        sdDiagnostics.cardError = HAL_SD_GetError(&hsd);
++    }
++#endif
+ 
      return (cardState == HAL_SD_CARD_TRANSFER);
  }
  
@@ -438,6 +616,7 @@ index a0813bd..88d7ce6 100644
 +    SD_Handle.RXCplt = 0;
 +    SD_Handle.TXCplt = 0;
 +    sdTransferFailed = false;
++    ++sdDiagnostics.attempts;
 +#endif
      memset(&hsd, 0, sizeof(hsd));
  
@@ -452,7 +631,7 @@ index a0813bd..88d7ce6 100644
  
      // drastically increases the time to respond from the sdcard
      // lets leave it off
-@@ -333,22 +374,33 @@ bool SD_Init(void)
+@@ -333,22 +470,38 @@ bool SD_Init(void)
  #endif
      hsd.Init.BusWide = SDMMC_BUS_WIDE_1B;
      hsd.Init.HardwareFlowControl = SDMMC_HARDWARE_FLOW_CONTROL_ENABLE;
@@ -467,6 +646,11 @@ index a0813bd..88d7ce6 100644
 +#endif
 +        return false;
      }
++#ifdef USE_MYBOX_SDMMC_RECOVERY
++    sdDiagnostics.cardType = hsd.SdCard.CardType;
++    sdDiagnostics.blocks = hsd.SdCard.LogBlockNbr;
++    sdDiagnostics.rca = hsd.SdCard.RelCardAdd;
++#endif
      if (hsd.SdCard.BlockNbr == 0) {
 -        return SD_ERROR;
 +#ifdef USE_MYBOX_SDMMC_RECOVERY
@@ -493,7 +677,7 @@ index a0813bd..88d7ce6 100644
      switch(hsd.SdCard.CardType) {
      case CARD_SDSC:
          switch (hsd.SdCard.CardVersion) {
-@@ -359,7 +411,10 @@ bool SD_Init(void)
+@@ -359,7 +512,10 @@ bool SD_Init(void)
              SD_CardType = SD_STD_CAPACITY_V2_0;
              break;
          default:
@@ -505,7 +689,7 @@ index a0813bd..88d7ce6 100644
          }
          break;
  
-@@ -368,7 +423,10 @@ bool SD_Init(void)
+@@ -368,7 +524,10 @@ bool SD_Init(void)
          break;
  
      default:
@@ -517,7 +701,7 @@ index a0813bd..88d7ce6 100644
      }
  
      // STATIC_ASSERT(sizeof(SD_Handle.CSD) == sizeof(hsd.CSD), hal-csd-size-error);
-@@ -377,7 +435,53 @@ bool SD_Init(void)
+@@ -377,7 +536,55 @@ bool SD_Init(void)
      // STATIC_ASSERT(sizeof(SD_Handle.CID) == sizeof(hsd.CID), hal-cid-size-error);
      memcpy(&SD_Handle.CID, &hsd.CID, sizeof(SD_Handle.CID));
  
@@ -528,21 +712,18 @@ index a0813bd..88d7ce6 100644
 +#ifdef USE_MYBOX_SDMMC_RECOVERY
 +static bool sdReadStartupBlock(void)
 +{
-+    static uint32_t sector[512 / sizeof(uint32_t)] __attribute__((aligned(32)));
++    static uint8_t sector[512];
 +
-+    if (SD_ReadBlocks_DMA(0, sector, sizeof(sector), 1) != SD_OK) {
-+        sdSetStartupFailure("start read of sector 0", HAL_SD_GetError(&hsd));
++    // During startup, check the data path without depending on an IDMA interrupt.
++    // After mounting, Blackbox uses the normal asynchronous DMA path.
++    if (HAL_SD_ReadBlocks(&hsd, sector, 0, 1, 250) != HAL_OK) {
++        sdSetStartupFailure("polled read of sector 0", HAL_SD_GetError(&hsd));
 +        return false;
 +    }
 +
-+    const uint32_t started = millis();
-+    while (SD_CheckRead() == SD_BUSY && millis() - started < 100) {
-+    }
-+    const SD_Error_t result = SD_CheckRead();
-+    if (result != SD_OK) {
-+        sdSetStartupFailure("read sector 0", result == SD_BUSY ? HAL_SD_ERROR_TIMEOUT : sdTransferError);
-+        return false;
-+    }
++    sdDiagnostics.bootSignature = (uint16_t)sector[510] | ((uint16_t)sector[511] << 8);
++    sdDiagnostics.bootPartitionTypes = ((uint32_t)sector[450] << 24) | ((uint32_t)sector[466] << 16) |
++        ((uint32_t)sector[482] << 8) | sector[498];
 +    return true;
 +}
 +#endif
@@ -558,11 +739,16 @@ index a0813bd..88d7ce6 100644
 +        }
 +
 +        // Retry once before starting Blackbox, with only DAT0 and a lower bus clock.
-+        sdBusWidth = 1;
++        sdDiagnostics.busWidth = 1;
 +        return !(sdInitCard(SDMMC_CLK_DIV * 2U, false) && sdReadStartupBlock());
 +    }
 +
-+    const bool wideBus = sdBusWidth == 4;
++    if (sdDiagnostics.busWidth == 4 && sdDiagnostics.firstFailure.phase &&
++        !sdDiagnostics.irqCompletions && !sdDiagnostics.polledCompletions) {
++        // Try the conservative bus profile if the first asynchronous transfers fail.
++        sdDiagnostics.busWidth = 1;
++    }
++    const bool wideBus = sdDiagnostics.busWidth == 4;
 +    return !sdInitCard(wideBus ? SDMMC_CLK_DIV : SDMMC_CLK_DIV * 2U, wideBus);
 +#elif defined(SDCARD_SDIO_4BIT)
 +    return !sdInitCard(SDMMC_CLK_DIV, true);
@@ -572,11 +758,14 @@ index a0813bd..88d7ce6 100644
  }
  
  SD_Error_t SD_GetCardInfo(void)
-@@ -582,11 +686,21 @@ SD_Error_t SD_GetCardInfo(void)
+@@ -582,11 +789,27 @@ SD_Error_t SD_GetCardInfo(void)
  }
  
  SD_Error_t SD_CheckWrite(void) {
 +#ifdef USE_MYBOX_SDMMC_RECOVERY
++    if (SD_Handle.TXCplt && !sdTransferFailed) {
++        sdPollTransfer();
++    }
 +    if (sdTransferFailed) {
 +        return SD_ERROR;
 +    }
@@ -587,6 +776,9 @@ index a0813bd..88d7ce6 100644
  
  SD_Error_t SD_CheckRead(void) {
 +#ifdef USE_MYBOX_SDMMC_RECOVERY
++    if (SD_Handle.RXCplt && !sdTransferFailed) {
++        sdPollTransfer();
++    }
 +    if (sdTransferFailed) {
 +        return SD_ERROR;
 +    }
@@ -594,45 +786,75 @@ index a0813bd..88d7ce6 100644
      if (SD_Handle.RXCplt != 0) return SD_BUSY;
      return SD_OK;
  }
-@@ -616,8 +730,14 @@ SD_Error_t SD_WriteBlocks_DMA(uint64_t WriteAddress, uint32_t *buffer, uint32_t
-             return SD_ERROR;
+@@ -594,8 +817,6 @@ SD_Error_t SD_CheckRead(void) {
+ SD_Error_t SD_WriteBlocks_DMA(uint64_t WriteAddress, uint32_t *buffer, uint32_t BlockSize, uint32_t NumberOfBlocks)
+ {
+     SD_Error_t ErrorState = SD_OK;
+-    SD_Handle.TXCplt = 1;
+-
+     if (BlockSize != 512) {
+         return SD_ERROR; // unsupported.
+     }
+@@ -617,9 +838,20 @@ SD_Error_t SD_WriteBlocks_DMA(uint64_t WriteAddress, uint32_t *buffer, uint32_t
          }
      }
-+#endif
-+#ifdef USE_MYBOX_SDMMC_RECOVERY
-+    sdTransferFailed = false;
  #endif
++#ifdef USE_MYBOX_SDMMC_RECOVERY
++    sdPrepareTransfer(WriteAddress);
++#endif
++    SD_Handle.TXCplt = 1;
      if (HAL_SD_WriteBlocks_DMA(&hsd, (uint8_t *)buffer, WriteAddress, NumberOfBlocks) != HAL_OK) {
++        SD_Handle.TXCplt = 0;
 +#ifdef USE_MYBOX_SDMMC_RECOVERY
-+        sdTransferError = HAL_SD_GetError(&hsd);
++        SD_RecordFailure("write rejected", false);
 +#endif
          return SD_ERROR;
      }
++#ifdef USE_MYBOX_SDMMC_RECOVERY
++    ++sdDiagnostics.writes;
++#endif
  
-@@ -659,8 +779,15 @@ SD_Error_t SD_ReadBlocks_DMA(uint64_t ReadAddress, uint32_t *buffer, uint32_t Bl
-             return SD_ERROR;
+     return ErrorState;
+ }
+@@ -646,8 +878,6 @@ SD_Error_t SD_ReadBlocks_DMA(uint64_t ReadAddress, uint32_t *buffer, uint32_t Bl
+     }
+ #endif
+ 
+-    SD_Handle.RXCplt = 1;
+-
+     sdReadParameters.buffer = buffer;
+     sdReadParameters.BlockSize = BlockSize;
+     sdReadParameters.NumberOfBlocks = NumberOfBlocks;
+@@ -660,9 +890,21 @@ SD_Error_t SD_ReadBlocks_DMA(uint64_t ReadAddress, uint32_t *buffer, uint32_t Bl
          }
      }
-+#endif
-+#ifdef USE_MYBOX_SDMMC_RECOVERY
-+    sdTransferFailed = false;
-+    SCB_InvalidateDCache_by_Addr(buffer, NumberOfBlocks * BlockSize);
  #endif
-     if (HAL_SD_ReadBlocks_DMA(&hsd, (uint8_t *)buffer, ReadAddress, NumberOfBlocks) != HAL_OK) {
 +#ifdef USE_MYBOX_SDMMC_RECOVERY
-+        sdTransferError = HAL_SD_GetError(&hsd);
++    sdPrepareTransfer(ReadAddress);
++    SCB_InvalidateDCache_by_Addr(buffer, NumberOfBlocks * BlockSize);
++#endif
++    SD_Handle.RXCplt = 1;
+     if (HAL_SD_ReadBlocks_DMA(&hsd, (uint8_t *)buffer, ReadAddress, NumberOfBlocks) != HAL_OK) {
++        SD_Handle.RXCplt = 0;
++#ifdef USE_MYBOX_SDMMC_RECOVERY
++        SD_RecordFailure("read rejected", false);
 +#endif
          return SD_ERROR;
      }
++#ifdef USE_MYBOX_SDMMC_RECOVERY
++    ++sdDiagnostics.reads;
++#endif
  
-@@ -698,6 +825,14 @@ void HAL_SD_RxCpltCallback(SD_HandleTypeDef *hsd)
+     return ErrorState;
+ }
+@@ -698,6 +940,14 @@ void HAL_SD_RxCpltCallback(SD_HandleTypeDef *hsd)
      SCB_InvalidateDCache_by_Addr((uint32_t*)alignedAddr, sdReadParameters.NumberOfBlocks * sdReadParameters.BlockSize + ((uint32_t)sdReadParameters.buffer - alignedAddr));
  }
  
 +#ifdef USE_MYBOX_SDMMC_RECOVERY
 +void HAL_SD_ErrorCallback(SD_HandleTypeDef *sd)
 +{
-+    sdTransferError = HAL_SD_GetError(sd);
++    sdCaptureFailure("HAL transfer error", HAL_SD_GetError(sd), sd->Instance->STA);
 +    sdTransferFailed = true;
 +}
 +#endif
@@ -640,8 +862,29 @@ index a0813bd..88d7ce6 100644
  void HAL_SD_AbortCallback(SD_HandleTypeDef *hsd)
  {
      UNUSED(hsd);
+@@ -708,12 +958,20 @@ void HAL_SD_AbortCallback(SD_HandleTypeDef *hsd)
+ 
+ void SDMMC1_IRQHandler(void)
+ {
++#ifdef USE_MYBOX_SDMMC_RECOVERY
++    sdServiceTransfer(true);
++#else
+     HAL_SD_IRQHandler(&hsd);
++#endif
+ }
+ 
+ void SDMMC2_IRQHandler(void)
+ {
++#ifdef USE_MYBOX_SDMMC_RECOVERY
++    sdServiceTransfer(true);
++#else
+     HAL_SD_IRQHandler(&hsd);
++#endif
+ }
+ 
+ #endif
 diff --git a/src/main/fc/cli.c b/src/main/fc/cli.c
-index 9bb2c77..859f216 100644
+index 9bb2c77..d52b6dc 100644
 --- a/src/main/fc/cli.c
 +++ b/src/main/fc/cli.c
 @@ -24,6 +24,9 @@
@@ -675,7 +918,7 @@ index 9bb2c77..859f216 100644
  
  // sync this with sensors_e
  static const char * const sensorTypeNames[] = {
-@@ -2857,6 +2865,17 @@ static void cliSdInfo(char *cmdline)
+@@ -2857,6 +2865,33 @@ static void cliSdInfo(char *cmdline)
  {
      UNUSED(cmdline);
  
@@ -685,15 +928,45 @@ index 9bb2c77..859f216 100644
 +        return;
 +    }
 +    const sdmmcDiagnostics_t diagnostics = SD_GetDiagnostics();
-+    cliPrintLinef("SDMMC: %u-bit, init: %s (0x%08x), transfer error: 0x%08x",
-+        diagnostics.busWidth, diagnostics.startupFailure ? diagnostics.startupFailure : "OK",
-+        (unsigned)diagnostics.startupError, (unsigned)diagnostics.transferError);
++    cliPrintLinef("SDMMC r9: %u-bit, init attempts %u, polling init %s (0x%08x)",
++        diagnostics.busWidth, (unsigned)diagnostics.attempts,
++        diagnostics.startupFailure ? diagnostics.startupFailure : "OK", (unsigned)diagnostics.startupError);
++    cliPrintLinef("Card: type %u, %u blocks, RCA 0x%04x, CMD13 state %u, R1 0x%08x, error 0x%08x",
++        (unsigned)diagnostics.cardType, (unsigned)diagnostics.blocks, (unsigned)diagnostics.rca,
++        (unsigned)diagnostics.cardState, (unsigned)diagnostics.cardResponse, (unsigned)diagnostics.cardError);
++    cliPrintLinef("LBA0: signature 0x%04x, MBR type bytes 0x%08x",
++        diagnostics.bootSignature, (unsigned)diagnostics.bootPartitionTypes);
++    cliPrintLinef("Transfer: reads %u, writes %u, IRQ %u, polled %u, failures %u, last error 0x%08x",
++        (unsigned)diagnostics.reads, (unsigned)diagnostics.writes, (unsigned)diagnostics.irqCompletions,
++        (unsigned)diagnostics.polledCompletions, (unsigned)diagnostics.failures, (unsigned)diagnostics.transferError);
++    const sdmmcFailure_t *failure = &diagnostics.firstFailure;
++    if (failure->phase) {
++        cliPrintLinef("First failure: %s, LBA %u, error 0x%08x", failure->phase,
++            (unsigned)failure->sector, (unsigned)failure->error);
++        cliPrintLinef("Registers: STA=%08x MASK=%08x DCOUNT=%08x DCTRL=%08x IDMACTRL=%08x IDMABASE0=%08x",
++            (unsigned)failure->status, (unsigned)failure->mask, (unsigned)failure->dataCount,
++            (unsigned)failure->dataControl, (unsigned)failure->dmaControl, (unsigned)failure->dmaAddress);
++    }
 +#endif
 +
      cliPrint("SD card: ");
  
      if (!sdcard_isInserted()) {
-@@ -2897,7 +2916,7 @@ static void cliSdInfo(char *cmdline)
+@@ -2865,7 +2900,13 @@ static void cliSdInfo(char *cmdline)
+     }
+ 
+     if (!sdcard_isInitialized()) {
++#ifdef USE_MYBOX_SDMMC_RECOVERY
++        cliPrintLinef("Startup failed, driver %s, filesystem state %u error %u",
++            sdcard_isFunctional() ? "initializing" : "disabled",
++            (unsigned)afatfs_getFilesystemState(), (unsigned)afatfs_getLastError());
++#else
+         cliPrintLine("Startup failed");
++#endif
+         return;
+     }
+ 
+@@ -2897,7 +2938,7 @@ static void cliSdInfo(char *cmdline)
  
              switch (afatfs_getLastError()) {
                  case AFATFS_ERROR_BAD_MBR:
@@ -702,7 +975,7 @@ index 9bb2c77..859f216 100644
                  break;
                  case AFATFS_ERROR_BAD_FILESYSTEM_HEADER:
                      cliPrint(" - bad FAT header");
-@@ -4144,6 +4163,26 @@ static void cliStatus(char *cmdline)
+@@ -4144,6 +4185,26 @@ static void cliStatus(char *cmdline)
  #endif // for if at32
  #endif // for SITL
  
