@@ -99,7 +99,7 @@
 #define USE_IMU_ICM42605         // INAV detects ICM-42688-P with this driver.
 #define ICM42605_SPI_BUS        BUS_SPI1
 #define ICM42605_CS_PIN         PC15
-#define IMU_ICM42605_ALIGN      CW0_DEG
+#define IMU_ICM42605_ALIGN      CW180_DEG_FLIP // Roll 180 degrees: X, -Y, -Z.
 #define SPI2_MISO_PIN           PB14
 #define SPI2_MOSI_PIN           PB15
 
