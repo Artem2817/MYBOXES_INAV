@@ -8,11 +8,11 @@ fi
 
 overlay_dir=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 checkout=$1
-tag=9.1.0
-revision=e519b69b02e27c8bdc03b4a0889f1baaae211a54
+line_config=$(python3 "$overlay_dir/tools/release_line.py" --build-config)
+IFS=$'\t' read -r tag revision <<< "$line_config"
 
 export PATH="$checkout/tools/mybox-ruby/bin:$PATH"
-for tool in git cmake make ruby; do
+for tool in git cmake make ruby python3; do
     if ! command -v "$tool" >/dev/null; then
         echo "Missing build dependency: $tool" >&2
         exit 1

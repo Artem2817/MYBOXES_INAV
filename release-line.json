@@ -1,0 +1,7 @@
+{
+  "branch": "inav-9",
+  "inav_major": 9,
+  "upstream_tag": "9.1.0",
+  "upstream_commit": "e519b69b02e27c8bdc03b4a0889f1baaae211a54",
+  "configurator": "9.1"
+}

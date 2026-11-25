@@ -1,9 +1,10 @@
-name: Validate firmware
+name: Validate INAV 9 firmware
 
 on:
   push:
-    branches: [main]
+    branches: [inav-9, inav-10]
   pull_request:
+    branches: [inav-9, inav-10]
   workflow_dispatch:
   workflow_call:
     inputs:
@@ -23,6 +24,11 @@ jobs:
       - uses: actions/checkout@v6
         with:
           persist-credentials: false
+
+      - name: Check release line and target branch
+        env:
+          SOURCE_BRANCH: ${{ github.base_ref || github.ref_name }}
+        run: python3 tools/release_line.py --ref "$SOURCE_BRANCH"
 
       - name: Install Ruby
         run: |
@@ -62,7 +68,7 @@ jobs:
       - name: Upload verified HEX, manifests and checksums
         uses: actions/upload-artifact@v4
         with:
-          name: myboxes-inav-firmware
+          name: myboxes-inav-9-firmware
           path: dist/
           if-no-files-found: error
           retention-days: 14

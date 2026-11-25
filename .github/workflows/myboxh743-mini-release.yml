@@ -1,5 +1,5 @@
-name: Build MyboxH743 Mini INAV release
-run-name: INAV Mini, Mini v2 and Mini v2 Vib (r${{ inputs.revision }}-dev)
+name: Publish Mini firmware (INAV 9 or 10)
+run-name: INAV 9 Mini, Mini v2 and Mini v2 Vib (r${{ inputs.revision }}-dev)
 
 on:
   workflow_dispatch:
@@ -7,19 +7,31 @@ on:
       revision:
         description: "Positive MYBOXES release revision. These images are bench prereleases."
         required: true
-        default: "1"
+        default: "16"
         type: string
 
 permissions:
   contents: read
 
 concurrency:
-  group: myboxes-inav-release
+  group: myboxes-inav-9-release
   cancel-in-progress: false
 
 jobs:
+  preflight:
+    name: Check selected release branch
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+      - name: Reject a release from the wrong branch
+        env:
+          SOURCE_BRANCH: ${{ github.ref_name }}
+        run: python3 tools/release_line.py --ref "$SOURCE_BRANCH"
+
   build:
-    if: github.ref == 'refs/heads/main'
+    needs: preflight
     uses: ./.github/workflows/validate-firmware.yml
     with:
       revision: ${{ inputs.revision }}
@@ -35,7 +47,7 @@ jobs:
     steps:
       - uses: actions/download-artifact@v4
         with:
-          name: myboxes-inav-firmware
+          name: myboxes-inav-9-firmware
           path: dist
 
       - name: Validate the release assets and reserve the version
@@ -56,10 +68,13 @@ jobs:
             tag=$(jq -er .release "$manifest")
             title=$(jq -er '.board_name + " INAV " + .version + " r" + (.revision | tostring) + "-dev"' "$manifest")
             firmware=$(jq -er '.files[0].name' "$manifest")
+            test "$(jq -er .source_branch "$manifest")" = "inav-9"
+            test "$(jq -er .inav_major "$manifest")" = "9"
             notes="Стендовая сборка MYBOX H743 Mini. PWM, USB DFU, локальный HEX в INAV Configurator 9.1 и SBUS на RCIN через mybox_sbus_rcin."
             notes="$notes Для MS4525 выберите pitot_hardware = MS4525. Опрос начинается с I²C2, затем проверяются остальные доступные I²C."
             notes="$notes Blackbox открывает FAT16/FAT32 в разделе MBR и без таблицы разделов. SDMMC включает подтяжки CMD/DAT, пробует чтение при старте и повторяет запуск в режиме 1 бит при ошибке."
             notes="$notes DShot доступен в настройках моторов. При двух ESC на PWM1–2 разъёмы PWM3 и дальше доступны для PWM-серв."
+            notes="$notes Ветка inav-9, основа проверенной r15 Stable. Новый выпуск — Dev до проверки на плате. DroneCAN GPS/компас из INAV 10 в эту ветку не переносится автоматически."
             if [[ "$directory" == dist/mini-v2-vib ]]; then
               notes="$notes Оба IMU и оба SPA06-003 доступны для проверки. Приоритет у выносных IMU и барометра. Ориентация выносного ICM-42670-P временная."
             fi
