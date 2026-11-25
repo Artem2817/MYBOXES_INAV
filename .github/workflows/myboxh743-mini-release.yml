@@ -56,10 +56,12 @@ jobs:
             tag=$(jq -er .release "$manifest")
             title=$(jq -er '.board_name + " INAV " + .version + " r" + (.revision | tostring) + "-dev"' "$manifest")
             firmware=$(jq -er '.files[0].name' "$manifest")
-            notes="Стендовая сборка MYBOX H743 Mini. PWM, USB DFU, локальный HEX в INAV Configurator 9.1 и SBUS на RCIN через mybox_sbus_rcin."
+            notes="Стендовая сборка MYBOX H743 Mini. PWM, USB DFU, локальный HEX в INAV Configurator 10.0 и SBUS на RCIN через mybox_sbus_rcin."
             notes="$notes Для MS4525 выберите pitot_hardware = MS4525. Опрос начинается с I²C2, затем проверяются остальные доступные I²C."
             notes="$notes Blackbox открывает FAT16/FAT32 в разделе MBR и без таблицы разделов. SDMMC включает подтяжки CMD/DAT, пробует чтение при старте и повторяет запуск в режиме 1 бит при ошибке."
             notes="$notes DShot доступен в настройках моторов. При двух ESC на PWM1–2 разъёмы PWM3 и дальше доступны для PWM-серв."
+            notes="$notes Основа INAV 10.0.0-rc2; r16 переносит определения плат из r15. Заводской профиль Matek M10Q-3100: CAN1, 1000 кбит/с, DNA ON, GPS и компас DroneCAN. Выбор CAN1/CAN2: dronecan_bus = 1 или 2, затем save. Один интерфейс активен одновременно."
+            notes="$notes Перед переходом с 9.x сохраните конфигурацию через Backup Config в Configurator 10, прошейте с Full Chip Erase. Restore Config заменит заводской профиль сохранёнными настройками."
             if [[ "$directory" == dist/mini-v2-vib ]]; then
               notes="$notes Оба IMU и оба SPA06-003 доступны для проверки. Приоритет у выносных IMU и барометра. Ориентация выносного ICM-42670-P временная."
             fi

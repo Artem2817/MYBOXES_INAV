@@ -79,8 +79,10 @@ def main():
     if args.revision < 1:
         parser.error("--revision must be positive")
     version = git_revision(args.checkout, "describe", "--tags", "--exact-match", "HEAD")
-    if not re.fullmatch(r"[0-9]+\.[0-9]+\.[0-9]+", version):
+    upstream_release = version
+    if not re.fullmatch(r"[0-9]+\.[0-9]+\.[0-9]+(?:-rc[1-9][0-9]*)?", upstream_release):
         parser.error(f"Invalid upstream version: {version}")
+    version = upstream_release.split("-", 1)[0]
     source_commit = git_revision(args.checkout, "rev-parse", "HEAD")
     project_commit = git_revision(Path(__file__).resolve().parents[1], "rev-parse", "HEAD")
 
@@ -101,7 +103,7 @@ def main():
             "schema": 1, "firmware": "inav", "release": tag, "channel": "dev",
             "board": board, "board_name": board_name, "target": target,
             "board_identifier": identifier, "version": version, "revision": args.revision,
-            "upstream_commit": source_commit, "git_commit": project_commit,
+            "upstream_release": upstream_release, "upstream_commit": source_commit, "git_commit": project_commit,
             "bench_only": True, "image_size": image_size,
             "files": [{"name": filename, "size": len(content), "sha256": checksum}],
         }

@@ -1,0 +1,2539 @@
+diff --git a/lib/main/STM32H7/Drivers/STM32H7xx_HAL_Driver/Src/stm32h7xx_hal_sd.c b/lib/main/STM32H7/Drivers/STM32H7xx_HAL_Driver/Src/stm32h7xx_hal_sd.c
+index 1a5ba8d..efdb7f0 100644
+--- a/lib/main/STM32H7/Drivers/STM32H7xx_HAL_Driver/Src/stm32h7xx_hal_sd.c
++++ b/lib/main/STM32H7/Drivers/STM32H7xx_HAL_Driver/Src/stm32h7xx_hal_sd.c
+@@ -3141,7 +3141,6 @@ static uint32_t SD_PowerON(SD_HandleTypeDef *hsd)
+ {
+   __IO uint32_t count = 0U;
+   uint32_t response = 0U;
+-  uint32_t validvoltage = 0U;
+   uint32_t errorstate;
+ #if (USE_SD_TRANSCEIVER != 0U)
+   uint32_t tickstart = HAL_GetTick();
+@@ -3154,6 +3153,61 @@ static uint32_t SD_PowerON(SD_HandleTypeDef *hsd)
+     return errorstate;
+   }
+ 
++#if defined(MYBOXH743MINI) || defined(MYBOXH743MINIV2) || defined(MYBOXH743MINIV2VIB_BENCH)
++  /* SD v1 cards leave CMD8 unanswered. The controller reports a command-response timeout. */
++  errorstate = SDMMC_CmdOperCond(hsd->Instance);
++  uint32_t ocr = 0x00FF8000U; /* 2.7-3.6 V, with no 1.8 V switching on MYBOX. */
++  if (errorstate == SDMMC_ERROR_NONE)
++  {
++    if ((SDMMC_GetResponse(hsd->Instance, SDMMC_RESP1) & 0xFFFU) != SDMMC_CHECK_PATTERN)
++    {
++      return HAL_SD_ERROR_INVALID_VOLTRANGE;
++    }
++    hsd->SdCard.CardVersion = CARD_V2_X;
++    ocr |= SDMMC_HIGH_CAPACITY;
++  }
++  else if (errorstate == SDMMC_ERROR_CMD_RSP_TIMEOUT || errorstate == SDMMC_ERROR_TIMEOUT)
++  {
++    hsd->SdCard.CardVersion = CARD_V1_X;
++    errorstate = SDMMC_CmdGoIdleState(hsd->Instance);
++    if (errorstate != HAL_SD_ERROR_NONE)
++    {
++      return errorstate;
++    }
++  }
++  else
++  {
++    return errorstate;
++  }
++
++  /* Poll the card's operating conditions at 10 ms intervals, as in ChibiOS. */
++  for (count = 0; count < 100U; ++count)
++  {
++    errorstate = SDMMC_CmdAppCommand(hsd->Instance, 0);
++    if (errorstate != HAL_SD_ERROR_NONE)
++    {
++      return errorstate;
++    }
++    errorstate = SDMMC_CmdAppOperCommand(hsd->Instance, ocr);
++    if (errorstate != HAL_SD_ERROR_NONE)
++    {
++      return errorstate;
++    }
++
++    response = SDMMC_GetResponse(hsd->Instance, SDMMC_RESP1);
++    if ((response & 0x80000000U) != 0U)
++    {
++      break;
++    }
++
++    HAL_Delay(10U);
++  }
++  if (count == 100U)
++  {
++    return HAL_SD_ERROR_TIMEOUT;
++  }
++#else
++  __IO uint32_t validvoltage = 0U;
+   /* CMD8: SEND_IF_COND: Command available only on V2.0 cards */
+   errorstate = SDMMC_CmdOperCond(hsd->Instance);
+   if (errorstate == SDMMC_ERROR_CMD_RSP_TIMEOUT) /* No response to CMD8 */
+@@ -3214,6 +3268,8 @@ static uint32_t SD_PowerON(SD_HandleTypeDef *hsd)
+     return HAL_SD_ERROR_INVALID_VOLTRANGE;
+   }
+ 
++#endif
++
+   /* Set default card type */
+   hsd->SdCard.CardType = CARD_SDSC;
+ 
+diff --git a/src/main/CMakeLists.txt b/src/main/CMakeLists.txt
+index 1cfd028..ffb389f 100755
+--- a/src/main/CMakeLists.txt
++++ b/src/main/CMakeLists.txt
+@@ -88,6 +88,7 @@ main_sources(COMMON_SRC
+     drivers/accgyro/accgyro_icm40609d.c
+     drivers/accgyro/accgyro_icm40609d.h
+     drivers/accgyro/accgyro_icm42605.c
++    drivers/accgyro/accgyro_icm42670.c
+     drivers/accgyro/accgyro_icm42605.h
+     drivers/accgyro/accgyro_icm45686.c
+     drivers/accgyro/accgyro_icm45686.h
+@@ -171,6 +172,8 @@ main_sources(COMMON_SRC
+     drivers/compass/compass_vcm5883.h
+     drivers/compass/compass_mlx90393.c
+     drivers/compass/compass_mlx90393.h
++    drivers/dronecan/mybox_can.c
++    drivers/compass/compass_dronecan.c
+     drivers/compass/compass_msp.c
+     drivers/compass/compass_msp.h
+ 
+diff --git a/src/main/config/parameter_group_ids.h b/src/main/config/parameter_group_ids.h
+index fe52a22..6b03261 100644
+--- a/src/main/config/parameter_group_ids.h
++++ b/src/main/config/parameter_group_ids.h
+@@ -136,7 +136,10 @@
+ #define PG_DRONECAN_CONFIG 1045
+ #define PG_TERRAIN_NAV_CONFIG 1046
+ #define PG_DRONECAN_DNA_SERVER 1047     // Separate PG so we don't wipe user settings if the allocation table changes
+-#define PG_INAV_END PG_DRONECAN_DNA_SERVER
++#define PG_MYBOX_SENSOR_CONFIG 1048
++#define PG_MYBOX_RCIN_CONFIG 1049
++#define PG_MYBOX_CAN_CONFIG 1050
++#define PG_INAV_END PG_MYBOX_CAN_CONFIG
+ 
+ // OSD configuration (subject to change)
+ //#define PG_OSD_FONT_CONFIG 2047
+diff --git a/src/main/drivers/accgyro/accgyro_icm42670.c b/src/main/drivers/accgyro/accgyro_icm42670.c
+new file mode 100644
+index 0000000..3842b46
+--- /dev/null
++++ b/src/main/drivers/accgyro/accgyro_icm42670.c
+@@ -0,0 +1,146 @@
++// SPDX-License-Identifier: GPL-3.0-or-later
++#include <stdint.h>
++
++#include "platform.h"
++
++#ifdef USE_IMU_ICM42670
++#include "drivers/accgyro/accgyro_icm42670.h"
++#include "drivers/time.h"
++
++// TDK DS-000451, user bank 0. UI sensor data is big-endian after reset.
++enum {
++    ICM42670_REG_RESET = 0x02,
++    ICM42670_REG_TEMP = 0x09,
++    ICM42670_REG_ACCEL = 0x0b,
++    ICM42670_REG_GYRO = 0x11,
++    ICM42670_REG_POWER = 0x1f,
++    ICM42670_REG_GYRO_CONFIG = 0x20,
++    ICM42670_REG_ACCEL_CONFIG = 0x21,
++    ICM42670_REG_DRDY = 0x39,
++    ICM42670_REG_WHO_AM_I = 0x75,
++    ICM42670_WHO_AM_I = 0x67,
++    ICM42670_SOFT_RESET = 0x10,
++    ICM42670_LOW_NOISE = 0x0f,
++    ICM42670_ODR_1600_HZ = 0x05,
++    ICM42670_DRDY = 0x01,
++};
++
++static int16_t icm42670ReadWord(const uint8_t *bytes)
++{
++    return (int16_t)((uint16_t)bytes[0] << 8 | bytes[1]);
++}
++
++static bool icm42670ReadAxes(busDevice_t *dev, uint8_t reg, float *axes)
++{
++    uint8_t bytes[6];
++    int16_t samples[XYZ_AXIS_COUNT];
++    if (!busReadBuf(dev, reg, bytes, sizeof(bytes))) {
++        return false;
++    }
++    for (unsigned axis = 0; axis < XYZ_AXIS_COUNT; ++axis) {
++        samples[axis] = icm42670ReadWord(&bytes[2 * axis]);
++        if (samples[axis] == INT16_MIN) {
++            return false;
++        }
++    }
++    for (unsigned axis = 0; axis < XYZ_AXIS_COUNT; ++axis) {
++        axes[axis] = samples[axis];
++    }
++    return true;
++}
++
++static bool icm42670GyroRead(gyroDev_t *gyro)
++{
++    uint8_t status;
++    return busRead(gyro->busDev, ICM42670_REG_DRDY, &status)
++        && status == ICM42670_DRDY
++        && icm42670ReadAxes(gyro->busDev, ICM42670_REG_GYRO, gyro->gyroADCRaw);
++}
++
++static bool icm42670AccRead(accDev_t *acc)
++{
++    return icm42670ReadAxes(acc->busDev, ICM42670_REG_ACCEL, acc->ADCRaw);
++}
++
++static bool icm42670ReadTemperature(gyroDev_t *gyro, int16_t *temperature)
++{
++    uint8_t bytes[2];
++    if (!busReadBuf(gyro->busDev, ICM42670_REG_TEMP, bytes, sizeof(bytes))) {
++        return false;
++    }
++    const int16_t raw = icm42670ReadWord(bytes);
++    if (raw == INT16_MIN) {
++        return false;
++    }
++    // INAV temperature callbacks use tenths of a degree Celsius.
++    *temperature = 250 + (int16_t)(raw / 12.8f);
++    return true;
++}
++
++static void icm42670AccInit(accDev_t *acc)
++{
++    acc->acc_1G = 2048; // +/-16 g, FS selector 0
++}
++
++static void icm42670GyroInit(gyroDev_t *gyro)
++{
++    gyro->sampleRateIntervalUs = 625; // 1600 Hz
++}
++
++static bool icm42670Configure(busDevice_t *dev)
++{
++    uint8_t id;
++    busSetSpeed(dev, BUS_SPEED_INITIALIZATION);
++    if (!busRead(dev, ICM42670_REG_WHO_AM_I, &id) || id != ICM42670_WHO_AM_I
++        || !busWrite(dev, ICM42670_REG_RESET, ICM42670_SOFT_RESET)) {
++        return false;
++    }
++    delay(10);
++    // FS selector 0 is +/-2000 dps and +/-16 g. Keep the reset filter settings.
++    if (!busWrite(dev, ICM42670_REG_GYRO_CONFIG, ICM42670_ODR_1600_HZ)
++        || !busWrite(dev, ICM42670_REG_ACCEL_CONFIG, ICM42670_ODR_1600_HZ)
++        || !busWrite(dev, ICM42670_REG_POWER, ICM42670_LOW_NOISE)) {
++        return false;
++    }
++    delay(50); // Gyro startup, including the register-write guard after power-up.
++    uint8_t gyroConfig, accelConfig, power;
++    return busRead(dev, ICM42670_REG_GYRO_CONFIG, &gyroConfig)
++        && gyroConfig == ICM42670_ODR_1600_HZ
++        && busRead(dev, ICM42670_REG_ACCEL_CONFIG, &accelConfig)
++        && accelConfig == ICM42670_ODR_1600_HZ
++        && busRead(dev, ICM42670_REG_POWER, &power)
++        && (power & ICM42670_LOW_NOISE) == ICM42670_LOW_NOISE;
++}
++
++bool icm42670GyroDetect(gyroDev_t *gyro)
++{
++    gyro->busDev = busDeviceInit(BUSTYPE_SPI, DEVHW_ICM42670, gyro->imuSensorToUse, OWNER_MPU);
++    if (!gyro->busDev) {
++        return false;
++    }
++    if (!icm42670Configure(gyro->busDev)) {
++        busDeviceDeInit(gyro->busDev);
++        gyro->busDev = NULL;
++        return false;
++    }
++    gyro->initFn = icm42670GyroInit;
++    gyro->readFn = icm42670GyroRead;
++    gyro->intStatusFn = gyroCheckDataReady;
++    gyro->temperatureFn = icm42670ReadTemperature;
++    gyro->scale = 1.0f / 16.4f;
++    gyro->gyroAlign = gyro->busDev->param;
++    return true;
++}
++
++bool icm42670AccDetect(accDev_t *acc)
++{
++    acc->busDev = busDeviceOpen(BUSTYPE_SPI, DEVHW_ICM42670, acc->imuSensorToUse);
++    if (!acc->busDev) {
++        return false;
++    }
++    acc->initFn = icm42670AccInit;
++    acc->readFn = icm42670AccRead;
++    acc->accAlign = acc->busDev->param;
++    return true;
++}
++#endif
+diff --git a/src/main/drivers/accgyro/accgyro_icm42670.h b/src/main/drivers/accgyro/accgyro_icm42670.h
+new file mode 100644
+index 0000000..778ecac
+--- /dev/null
++++ b/src/main/drivers/accgyro/accgyro_icm42670.h
+@@ -0,0 +1,7 @@
++// SPDX-License-Identifier: GPL-3.0-or-later
++#pragma once
++
++#include "drivers/accgyro/accgyro.h"
++
++bool icm42670AccDetect(accDev_t *acc);
++bool icm42670GyroDetect(gyroDev_t *gyro);
+diff --git a/src/main/drivers/barometer/barometer_spl06.c b/src/main/drivers/barometer/barometer_spl06.c
+index 99870dc..8f492d2 100644
+--- a/src/main/drivers/barometer/barometer_spl06.c
++++ b/src/main/drivers/barometer/barometer_spl06.c
+@@ -31,7 +31,14 @@
+ 
+ #if defined(USE_BARO_SPL06)
+ 
+-// SPL06, address 0x76
++// Goermicro SPA06-003 has a different ID and three more calibration bytes.
++#ifdef SPL06_USE_SPA06
++#define BARO_CHIP_ID 0x11
++#define BARO_CALIB_COEFFS_LEN 21
++#else
++#define BARO_CHIP_ID SPL06_DEFAULT_CHIP_ID
++#define BARO_CALIB_COEFFS_LEN SPL06_CALIB_COEFFS_LEN
++#endif
+ 
+ typedef struct {
+     int16_t c0;
+@@ -43,13 +50,29 @@ typedef struct {
+     int16_t c20;
+     int16_t c21;
+     int16_t c30;
++#ifdef SPL06_USE_SPA06
++    int16_t c31;
++    int16_t c40;
++#endif
+ } spl06_coeffs_t;
+ 
+ 
+-spl06_coeffs_t spl06_cal;
+-// uncompensated pressure and temperature
+-static int32_t spl06_pressure_raw = 0;
+-static int32_t spl06_temperature_raw = 0;
++typedef struct {
++    spl06_coeffs_t cal;
++    int32_t pressureRaw;
++    int32_t temperatureRaw;
++} spl06State_t;
++
++#ifdef USE_MYBOX_VIB
++static spl06State_t spl06State[2];
++#else
++static spl06State_t spl06State[1];
++#endif
++
++static spl06State_t *spl06GetState(const baroDev_t *baro)
++{
++    return &spl06State[baro->busDev->descriptorPtr->tag];
++}
+ 
+ static int8_t spl06_samples_to_cfg_reg_value(uint8_t sample_rate)
+ {
+@@ -90,6 +113,12 @@ static bool spl06_start_temperature_measurement(baroDev_t * baro)
+ 
+ static bool spl06_read_temperature(baroDev_t * baro)
+ {
++#ifdef SPL06_USE_SPA06
++    uint8_t status;
++    if (!busRead(baro->busDev, SPL06_MODE_AND_STATUS_REG, &status) || !(status & SPL06_MEAS_CFG_TEMPERATURE_RDY)) {
++        return false;
++    }
++#endif
+     uint8_t data[SPL06_TEMPERATURE_LEN];
+     int32_t spl06_temperature;
+ 
+@@ -97,7 +126,7 @@ static bool spl06_read_temperature(baroDev_t * baro)
+ 
+     if (ack) {
+         spl06_temperature = (int32_t)((data[0] & 0x80 ? 0xFF000000 : 0) | (((uint32_t)(data[0])) << 16) | (((uint32_t)(data[1])) << 8) | ((uint32_t)data[2]));
+-        spl06_temperature_raw = spl06_temperature;
++        spl06GetState(baro)->temperatureRaw = spl06_temperature;
+     }
+ 
+     return ack;
+@@ -110,6 +139,12 @@ static bool spl06_start_pressure_measurement(baroDev_t * baro)
+ 
+ static bool spl06_read_pressure(baroDev_t * baro)
+ {
++#ifdef SPL06_USE_SPA06
++    uint8_t status;
++    if (!busRead(baro->busDev, SPL06_MODE_AND_STATUS_REG, &status) || !(status & SPL06_MEAS_CFG_PRESSURE_RDY)) {
++        return false;
++    }
++#endif
+     uint8_t data[SPL06_PRESSURE_LEN];
+     int32_t spl06_pressure;
+ 
+@@ -117,42 +152,47 @@ static bool spl06_read_pressure(baroDev_t * baro)
+ 
+     if (ack) {
+         spl06_pressure = (int32_t)((data[0] & 0x80 ? 0xFF000000 : 0) | (((uint32_t)(data[0])) << 16) | (((uint32_t)(data[1])) << 8) | ((uint32_t)data[2]));
+-        spl06_pressure_raw = spl06_pressure;
++        spl06GetState(baro)->pressureRaw = spl06_pressure;
+     }
+ 
+     return ack;
+ }
+ 
+ // Returns temperature in degrees centigrade
+-static float spl06_compensate_temperature(int32_t temperature_raw)
++static float spl06_compensate_temperature(const spl06State_t *state)
+ {
+-    const float t_raw_sc = (float)temperature_raw / spl06_raw_value_scale_factor(SPL06_TEMPERATURE_OVERSAMPLING);
+-    const float temp_comp = (float)spl06_cal.c0 / 2 + t_raw_sc * spl06_cal.c1;
++    const float t_raw_sc = (float)state->temperatureRaw / spl06_raw_value_scale_factor(SPL06_TEMPERATURE_OVERSAMPLING);
++    const float temp_comp = (float)state->cal.c0 / 2 + t_raw_sc * state->cal.c1;
+     return temp_comp;
+ }
+ 
+ // Returns pressure in Pascal
+-static float spl06_compensate_pressure(int32_t pressure_raw, int32_t temperature_raw)
++static float spl06_compensate_pressure(const spl06State_t *state)
+ {
+-    const float p_raw_sc = (float)pressure_raw / spl06_raw_value_scale_factor(SPL06_PRESSURE_OVERSAMPLING);
+-    const float t_raw_sc = (float)temperature_raw / spl06_raw_value_scale_factor(SPL06_TEMPERATURE_OVERSAMPLING);
+-
+-    const float pressure_cal = (float)spl06_cal.c00 + p_raw_sc * ((float)spl06_cal.c10 + p_raw_sc * ((float)spl06_cal.c20 + p_raw_sc * spl06_cal.c30));
+-    const float p_temp_comp = t_raw_sc * ((float)spl06_cal.c01 + p_raw_sc * ((float)spl06_cal.c11 + p_raw_sc * spl06_cal.c21));
++    const float p_raw_sc = (float)state->pressureRaw / spl06_raw_value_scale_factor(SPL06_PRESSURE_OVERSAMPLING);
++    const float t_raw_sc = (float)state->temperatureRaw / spl06_raw_value_scale_factor(SPL06_TEMPERATURE_OVERSAMPLING);
++
++    float pressure_cubic = state->cal.c30;
++    float temperature_quadratic = state->cal.c21;
++#ifdef SPL06_USE_SPA06
++    pressure_cubic += p_raw_sc * state->cal.c40;
++    temperature_quadratic += p_raw_sc * state->cal.c31;
++#endif
++    const float pressure_cal = (float)state->cal.c00 + p_raw_sc * ((float)state->cal.c10 + p_raw_sc * ((float)state->cal.c20 + p_raw_sc * pressure_cubic));
++    const float p_temp_comp = t_raw_sc * ((float)state->cal.c01 + p_raw_sc * ((float)state->cal.c11 + p_raw_sc * temperature_quadratic));
+ 
+     return pressure_cal + p_temp_comp;
+ }
+ 
+ bool spl06_calculate(baroDev_t * baro, int32_t * pressure, int32_t * temperature)
+ {
+-    UNUSED(baro);
+-
++    const spl06State_t *state = spl06GetState(baro);
+     if (pressure) {
+-        *pressure = lrintf(spl06_compensate_pressure(spl06_pressure_raw, spl06_temperature_raw));
++        *pressure = lrintf(spl06_compensate_pressure(state));
+     }
+ 
+     if (temperature) {
+-        *temperature = lrintf(spl06_compensate_temperature(spl06_temperature_raw) * 100);
++        *temperature = lrintf(spl06_compensate_temperature(state) * 100);
+     }
+ 
+     return true;
+@@ -165,7 +205,7 @@ static bool deviceDetect(busDevice_t * busDev)
+     for (int retry = 0; retry < DETECTION_MAX_RETRY_COUNT; retry++) {
+         delay(100);
+         bool ack = busRead(busDev, SPL06_CHIP_ID_REG, &chipId);
+-        if (ack && chipId == SPL06_DEFAULT_CHIP_ID) {
++        if (ack && chipId == BARO_CHIP_ID) {
+             return true;
+         }
+     };
+@@ -178,21 +218,29 @@ static bool read_calibration_coefficients(baroDev_t *baro) {
+     if (!(busRead(baro->busDev, SPL06_MODE_AND_STATUS_REG, &sstatus) && (sstatus & SPL06_MEAS_CFG_COEFFS_RDY)))
+         return false;   // error reading status or coefficients not ready
+ 
+-    uint8_t caldata[SPL06_CALIB_COEFFS_LEN];
++    uint8_t caldata[BARO_CALIB_COEFFS_LEN];
+ 
+-    if (!busReadBuf(baro->busDev, SPL06_CALIB_COEFFS_START, (uint8_t *)&caldata, SPL06_CALIB_COEFFS_LEN)) {
++    if (!busReadBuf(baro->busDev, SPL06_CALIB_COEFFS_START, caldata, sizeof(caldata))) {
+         return false;
+     }
+ 
+-    spl06_cal.c0 = (caldata[0] & 0x80 ? 0xF000 : 0) | ((uint16_t)caldata[0] << 4) | (((uint16_t)caldata[1] & 0xF0) >> 4);
+-    spl06_cal.c1 = ((caldata[1] & 0x8 ? 0xF000 : 0) | ((uint16_t)caldata[1] & 0x0F) << 8) | (uint16_t)caldata[2];
+-    spl06_cal.c00 = (caldata[3] & 0x80 ? 0xFFF00000 : 0) | ((uint32_t)caldata[3] << 12) | ((uint32_t)caldata[4] << 4) | (((uint32_t)caldata[5] & 0xF0) >> 4);
+-    spl06_cal.c10 = (caldata[5] & 0x8 ? 0xFFF00000 : 0) | (((uint32_t)caldata[5] & 0x0F) << 16) | ((uint32_t)caldata[6] << 8) | (uint32_t)caldata[7];
+-    spl06_cal.c01 = ((uint16_t)caldata[8] << 8) | ((uint16_t)caldata[9]);
+-    spl06_cal.c11 = ((uint16_t)caldata[10] << 8) | (uint16_t)caldata[11];
+-    spl06_cal.c20 = ((uint16_t)caldata[12] << 8) | (uint16_t)caldata[13];
+-    spl06_cal.c21 = ((uint16_t)caldata[14] << 8) | (uint16_t)caldata[15];
+-    spl06_cal.c30 = ((uint16_t)caldata[16] << 8) | (uint16_t)caldata[17];
++    spl06State_t *state = spl06GetState(baro);
++    state->cal.c0 = (caldata[0] & 0x80 ? 0xF000 : 0) | ((uint16_t)caldata[0] << 4) | (((uint16_t)caldata[1] & 0xF0) >> 4);
++    state->cal.c1 = ((caldata[1] & 0x8 ? 0xF000 : 0) | ((uint16_t)caldata[1] & 0x0F) << 8) | (uint16_t)caldata[2];
++    state->cal.c00 = (caldata[3] & 0x80 ? 0xFFF00000 : 0) | ((uint32_t)caldata[3] << 12) | ((uint32_t)caldata[4] << 4) | (((uint32_t)caldata[5] & 0xF0) >> 4);
++    state->cal.c10 = (caldata[5] & 0x8 ? 0xFFF00000 : 0) | (((uint32_t)caldata[5] & 0x0F) << 16) | ((uint32_t)caldata[6] << 8) | (uint32_t)caldata[7];
++    state->cal.c01 = ((uint16_t)caldata[8] << 8) | ((uint16_t)caldata[9]);
++    state->cal.c11 = ((uint16_t)caldata[10] << 8) | (uint16_t)caldata[11];
++    state->cal.c20 = ((uint16_t)caldata[12] << 8) | (uint16_t)caldata[13];
++    state->cal.c21 = ((uint16_t)caldata[14] << 8) | (uint16_t)caldata[15];
++    state->cal.c30 = ((uint16_t)caldata[16] << 8) | (uint16_t)caldata[17];
++#ifdef SPL06_USE_SPA06
++    // The signed 12-bit c31 and c40 share register 0x23.
++    const int16_t c31 = (caldata[18] << 4) | (caldata[19] >> 4);
++    const int16_t c40 = ((caldata[19] & 0x0f) << 8) | caldata[20];
++    state->cal.c31 = (c31 ^ 0x800) - 0x800;
++    state->cal.c40 = (c40 ^ 0x800) - 0x800;
++#endif
+ 
+     return true;
+ }
+@@ -201,7 +249,10 @@ static bool spl06_configure_measurements(baroDev_t *baro)
+ {
+     uint8_t reg_value;
+ 
+-    reg_value = SPL06_TEMP_USE_EXT_SENSOR | spl06_samples_to_cfg_reg_value(SPL06_TEMPERATURE_OVERSAMPLING);
++    reg_value = spl06_samples_to_cfg_reg_value(SPL06_TEMPERATURE_OVERSAMPLING);
++#ifndef SPL06_USE_SPA06
++    reg_value |= SPL06_TEMP_USE_EXT_SENSOR;
++#endif
+     if (!busWrite(baro->busDev, SPL06_TEMPERATURE_CFG_REG, reg_value)) {
+         return false;
+     }
+@@ -225,9 +276,12 @@ static bool spl06_configure_measurements(baroDev_t *baro)
+     return true;
+ }
+ 
+-bool spl06Detect(baroDev_t *baro)
++bool spl06DetectTag(baroDev_t *baro, uint8_t tag)
+ {
+-    baro->busDev = busDeviceInit(BUSTYPE_ANY, DEVHW_SPL06, 0, OWNER_BARO);
++    if (tag >= sizeof(spl06State) / sizeof(spl06State[0])) {
++        return false;
++    }
++    baro->busDev = busDeviceInit(BUSTYPE_ANY, DEVHW_SPL06, tag, OWNER_BARO);
+     if (baro->busDev == NULL) {
+         return false;
+     }
+@@ -236,6 +290,7 @@ bool spl06Detect(baroDev_t *baro)
+ 
+     if (!(deviceDetect(baro->busDev) && read_calibration_coefficients(baro) && spl06_configure_measurements(baro))) {
+         busDeviceDeInit(baro->busDev);
++        baro->busDev = NULL;
+         return false;
+     }
+ 
+@@ -248,8 +303,12 @@ bool spl06Detect(baroDev_t *baro)
+     baro->get_up = spl06_read_pressure;
+ 
+     baro->calculate = spl06_calculate;
+-
+     return true;
+ }
+ 
++bool spl06Detect(baroDev_t *baro)
++{
++    return spl06DetectTag(baro, 0);
++}
++
+ #endif
+diff --git a/src/main/drivers/barometer/barometer_spl06.h b/src/main/drivers/barometer/barometer_spl06.h
+index a92f1c5..746ae40 100644
+--- a/src/main/drivers/barometer/barometer_spl06.h
++++ b/src/main/drivers/barometer/barometer_spl06.h
+@@ -68,4 +68,5 @@
+ #define SPL06_MEASUREMENT_TIME(oversampling)   ((2 + lrintf(oversampling * 1.6)) + 1) // ms
+ 
+ bool spl06Detect(baroDev_t *baro);
++bool spl06DetectTag(baroDev_t *baro, uint8_t tag);
+ 
+diff --git a/src/main/drivers/bus.h b/src/main/drivers/bus.h
+index 75da648..d37810c 100644
+--- a/src/main/drivers/bus.h
++++ b/src/main/drivers/bus.h
+@@ -150,6 +150,7 @@ typedef enum {
+     DEVHW_UG2864,       // I2C OLED display
+     DEVHW_SDCARD,       // Generic SD-Card
+     DEVHW_IRLOCK,       // IR-Lock visual positioning hardware
++    DEVHW_ICM42670,
+     DEVHW_PCF8574,      // 8-bit I/O expander
+     DEVHW_INA226,       // I2C current and voltage monitor
+ } devHardwareType_e;
+diff --git a/src/main/drivers/bus_i2c_hal.c b/src/main/drivers/bus_i2c_hal.c
+index 3b1459a..91749ca 100644
+--- a/src/main/drivers/bus_i2c_hal.c
++++ b/src/main/drivers/bus_i2c_hal.c
+@@ -329,8 +329,15 @@ void i2cInit(I2CDevice device)
+     i2cUnstick(scl, sda);
+ 
+     // Init pins
++    uint8_t sdaAf = hardware->af;
++#if defined(STM32H7) && defined(USE_I2C_DEVICE_4)
++    // PB9 uses AF6 for I2C4 even when SCL uses AF4.
++    if (hardware->dev == I2C4 && hardware->sda == IO_TAG(PB9)) {
++        sdaAf = GPIO_AF6_I2C4;
++    }
++#endif
+     IOConfigGPIOAF(scl, IOCFG_I2C, hardware->af);
+-    IOConfigGPIOAF(sda, IOCFG_I2C, hardware->af);
++    IOConfigGPIOAF(sda, IOCFG_I2C, sdaAf);
+ 
+     // Init I2C peripheral
+     pHandle->Instance = hardware->dev;
+diff --git a/src/main/drivers/compass/compass_dronecan.c b/src/main/drivers/compass/compass_dronecan.c
+new file mode 100644
+index 0000000..52cca81
+--- /dev/null
++++ b/src/main/drivers/compass/compass_dronecan.c
+@@ -0,0 +1,68 @@
++// SPDX-License-Identifier: GPL-3.0-or-later
++#include <stdbool.h>
++#include <stdint.h>
++#include <math.h>
++#include "platform.h"
++#ifdef USE_MAG_DRONECAN
++#include "common/axis.h"
++#include "drivers/time.h"
++#include "drivers/compass/compass.h"
++#include "drivers/compass/compass_dronecan.h"
++
++static int16_t fieldMilliGauss[3];
++static uint32_t lastUpdateMs;
++static bool hasSample;
++static uint8_t selectedNode;
++static uint8_t selectedSensor;
++
++static bool dronecanMagInit(magDev_t *mag)
++{
++    (void)mag;
++    hasSample = false;
++    selectedNode = 0;
++    return true;
++}
++
++void dronecanMagReceive(uint8_t nodeId, uint8_t sensorId, const float fieldGauss[3])
++{
++    if (nodeId == 0 || nodeId > 127) {
++        return;
++    }
++    for (unsigned axis = 0; axis < 3; axis++) {
++        if (!isfinite(fieldGauss[axis]) || fabsf(fieldGauss[axis]) > 16.0f) {
++            return;
++        }
++    }
++    if (fieldGauss[0] == 0 && fieldGauss[1] == 0 && fieldGauss[2] == 0) {
++        return;
++    }
++    if (selectedNode && (nodeId != selectedNode || sensorId != selectedSensor)) {
++        return;
++    }
++    selectedNode = nodeId;
++    selectedSensor = sensorId;
++    for (unsigned axis = 0; axis < 3; axis++) {
++        fieldMilliGauss[axis] = (int16_t)lrintf(fieldGauss[axis] * 1000.0f);
++    }
++    lastUpdateMs = millis();
++    hasSample = true;
++}
++
++static bool dronecanMagRead(magDev_t *mag)
++{
++    if (!hasSample || (uint32_t)(millis() - lastUpdateMs) > 500U) {
++        return false;
++    }
++    for (unsigned axis = 0; axis < 3; axis++) {
++        mag->magADCRaw[axis] = fieldMilliGauss[axis];
++    }
++    return true;
++}
++
++bool dronecanMagDetect(magDev_t *mag)
++{
++    mag->init = dronecanMagInit;
++    mag->read = dronecanMagRead;
++    return true;
++}
++#endif
+diff --git a/src/main/drivers/compass/compass_dronecan.h b/src/main/drivers/compass/compass_dronecan.h
+new file mode 100644
+index 0000000..fd0f27a
+--- /dev/null
++++ b/src/main/drivers/compass/compass_dronecan.h
+@@ -0,0 +1,7 @@
++// SPDX-License-Identifier: GPL-3.0-or-later
++#pragma once
++#include <stdbool.h>
++#include <stdint.h>
++struct magDev_s;
++bool dronecanMagDetect(struct magDev_s *mag);
++void dronecanMagReceive(uint8_t nodeId, uint8_t sensorId, const float fieldGauss[3]);
+diff --git a/src/main/drivers/dronecan/dronecan.c b/src/main/drivers/dronecan/dronecan.c
+index 0778c15..9cb47b1 100644
+--- a/src/main/drivers/dronecan/dronecan.c
++++ b/src/main/drivers/dronecan/dronecan.c
+@@ -36,6 +36,10 @@
+ 
+ #include "sensors/battery_sensor_dronecan.h"
+ #include "sensors/diagnostics.h"
++#ifdef USE_MAG_DRONECAN
++#include "drivers/compass/compass_dronecan.h"
++#include "sensors/compass.h"
++#endif
+ 
+ /* Private variables ---------------------------------------------------------*/
+ 
+@@ -409,6 +413,17 @@ static bool shouldAcceptTransfer(const CanardInstance *ins,
+         case UAVCAN_PROTOCOL_DYNAMIC_NODE_ID_ALLOCATION_ID:
+             *out_data_type_signature = UAVCAN_PROTOCOL_DYNAMIC_NODE_ID_ALLOCATION_SIGNATURE;
+             return true;
++#ifdef USE_MAG_DRONECAN
++        case DRONECAN_SENSORS_MAGNETOMETER_MAGNETICFIELDSTRENGTHHIRES_ID:
++            *out_data_type_signature = DRONECAN_SENSORS_MAGNETOMETER_MAGNETICFIELDSTRENGTHHIRES_SIGNATURE;
++            return true;
++        case UAVCAN_EQUIPMENT_AHRS_MAGNETICFIELDSTRENGTH_ID:
++            *out_data_type_signature = UAVCAN_EQUIPMENT_AHRS_MAGNETICFIELDSTRENGTH_SIGNATURE;
++            return true;
++        case UAVCAN_EQUIPMENT_AHRS_MAGNETICFIELDSTRENGTH2_ID:
++            *out_data_type_signature = UAVCAN_EQUIPMENT_AHRS_MAGNETICFIELDSTRENGTH2_SIGNATURE;
++            return true;
++#endif
+         case UAVCAN_EQUIPMENT_GNSS_AUXILIARY_ID:
+             *out_data_type_signature = UAVCAN_EQUIPMENT_GNSS_AUXILIARY_SIGNATURE;
+             return true;
+@@ -431,6 +446,31 @@ static bool shouldAcceptTransfer(const CanardInstance *ins,
+ 
+ // Canard Handlers ( Many have code copied from libcanard esc_node example: https://github.com/dronecan/libcanard/blob/master/examples/ESCNode/esc_node.c )
+ 
++#ifdef USE_MAG_DRONECAN
++static void handle_MagneticField(CanardRxTransfer *transfer)
++{
++    if (compassConfig()->mag_hardware != MAG_DRONECAN) {
++        return;
++    }
++    if (transfer->data_type_id == DRONECAN_SENSORS_MAGNETOMETER_MAGNETICFIELDSTRENGTHHIRES_ID) {
++        struct dronecan_sensors_magnetometer_MagneticFieldStrengthHiRes message;
++        if (!dronecan_sensors_magnetometer_MagneticFieldStrengthHiRes_decode(transfer, &message)) {
++            dronecanMagReceive(transfer->source_node_id, message.sensor_id, message.magnetic_field_ga);
++        }
++    } else if (transfer->data_type_id == UAVCAN_EQUIPMENT_AHRS_MAGNETICFIELDSTRENGTH2_ID) {
++        struct uavcan_equipment_ahrs_MagneticFieldStrength2 message;
++        if (!uavcan_equipment_ahrs_MagneticFieldStrength2_decode(transfer, &message)) {
++            dronecanMagReceive(transfer->source_node_id, message.sensor_id, message.magnetic_field_ga);
++        }
++    } else {
++        struct uavcan_equipment_ahrs_MagneticFieldStrength message;
++        if (!uavcan_equipment_ahrs_MagneticFieldStrength_decode(transfer, &message)) {
++            dronecanMagReceive(transfer->source_node_id, 0, message.magnetic_field_ga);
++        }
++    }
++}
++#endif
++
+ static void handle_GNSSAuxiliary(CanardInstance *ins, CanardRxTransfer *transfer) {
+ 	UNUSED(ins);
+     if (gpsConfig()->provider != GPS_DRONECAN) return;
+@@ -576,6 +616,13 @@ static void onTransferReceived(CanardInstance *ins, CanardRxTransfer *transfer)
+                 }
+                 break;
+ 
++#ifdef USE_MAG_DRONECAN
++            case DRONECAN_SENSORS_MAGNETOMETER_MAGNETICFIELDSTRENGTHHIRES_ID:
++            case UAVCAN_EQUIPMENT_AHRS_MAGNETICFIELDSTRENGTH_ID:
++            case UAVCAN_EQUIPMENT_AHRS_MAGNETICFIELDSTRENGTH2_ID:
++                handle_MagneticField(transfer);
++                break;
++#endif
+             case UAVCAN_EQUIPMENT_GNSS_AUXILIARY_ID:
+                 handle_GNSSAuxiliary(ins, transfer);
+                 break;
+diff --git a/src/main/drivers/dronecan/libcanard/canard_stm32h7xx_driver.c b/src/main/drivers/dronecan/libcanard/canard_stm32h7xx_driver.c
+index 3d8a4c7..6afe4ca 100644
+--- a/src/main/drivers/dronecan/libcanard/canard_stm32h7xx_driver.c
++++ b/src/main/drivers/dronecan/libcanard/canard_stm32h7xx_driver.c
+@@ -16,6 +16,9 @@
+ #include "canard.h"
+ #include "canard_stm32_driver.h"
+ #include "canard_stm32_timing.h"
++#ifdef USE_MYBOX_CAN_SELECT
++#include "drivers/dronecan/mybox_can.h"
++#endif
+ 
+ #include "stm32h7xx_hal.h"
+ #include "stm32h7xx_hal_def.h"
+@@ -54,7 +57,11 @@ int16_t canardSTM32CAN1_Init(uint32_t bitrate)
+     sFilterConfig.FilterConfig = FDCAN_FILTER_TO_RXFIFO0;
+     sFilterConfig.FilterID1 = 0x0;
+     sFilterConfig.FilterID2 = 0x0;
++#ifdef USE_MYBOX_CAN_SELECT
++    hfdcan1.Instance = myboxCanConfig()->bus == 2 ? FDCAN2 : FDCAN1;
++#else
+     hfdcan1.Instance = FDCAN1;
++#endif
+     hfdcan1.Init.FrameFormat = FDCAN_FRAME_CLASSIC;  // Initialize in CAN2.0 mode not CAN_FD
+     hfdcan1.Init.Mode = FDCAN_MODE_NORMAL;
+     hfdcan1.Init.AutoRetransmission = DISABLE;  // ENABLE fills the 32-slot TX FIFO on a degraded bus; DroneCAN reliability is handled at the application layer
+@@ -115,8 +122,9 @@ int16_t canardSTM32CAN1_Init(uint32_t bitrate)
+     }
+ 
+     /* FDCAN_IT_TX_COMPLETE routes to LINE0 by default (ILS resets to 0) */
+-    HAL_NVIC_SetPriority(FDCAN1_IT0_IRQn, NVIC_PRIO_CAN, 0);
+-    HAL_NVIC_EnableIRQ(FDCAN1_IT0_IRQn);
++    const IRQn_Type irq = hfdcan1.Instance == FDCAN2 ? FDCAN2_IT0_IRQn : FDCAN1_IT0_IRQn;
++    HAL_NVIC_SetPriority(irq, NVIC_PRIO_CAN, 0);
++    HAL_NVIC_EnableIRQ(irq);
+ 
+     return CANARD_OK;
+ }
+@@ -274,6 +282,13 @@ void canardSTM32GetUniqueID(uint8_t id[16]) {
+ 
+ // ---- ISR handler ------------------------------------------------------------
+ 
++#ifdef USE_MYBOX_CAN_SELECT
++void FDCAN2_IT0_IRQHandler(void)
++{
++    HAL_FDCAN_IRQHandler(&hfdcan1);
++}
++#endif
++
+ void FDCAN1_IT0_IRQHandler(void) {
+     HAL_FDCAN_IRQHandler(&hfdcan1);
+ }
+@@ -287,6 +302,27 @@ void FDCAN1_IT0_IRQHandler(void) {
+   */
+ static void canardSTM32GPIO_Init(void)
+ {
++#ifdef USE_MYBOX_CAN_SELECT
++    const bool second = myboxCanConfig()->bus == 2;
++    const ioTag_t tx = second ? IO_TAG(CAN2_TX) : IO_TAG(CAN1_TX);
++    const ioTag_t rx = second ? IO_TAG(CAN2_RX) : IO_TAG(CAN1_RX);
++    const uint8_t af = second ? GPIO_AF9_FDCAN2 : GPIO_AF9_FDCAN1;
++    IOInit(IOGetByTag(tx), OWNER_DRONECAN, RESOURCE_CAN_TX, second ? 1 : 0);
++    IOConfigGPIOAF(IOGetByTag(tx), IOCFG_AF_PP_FAST_UP, af);
++    IOInit(IOGetByTag(rx), OWNER_DRONECAN, RESOURCE_CAN_RX, second ? 1 : 0);
++    IOConfigGPIOAF(IOGetByTag(rx), IOCFG_AF_PP_FAST_UP, af);
++#ifdef CAN1_STANDBY
++    IOInit(IOGetByTag(IO_TAG(CAN1_STANDBY)), OWNER_DRONECAN, RESOURCE_CAN_STANDBY, 0);
++    IOWrite(IOGetByTag(IO_TAG(CAN1_STANDBY)), second);
++    IOConfigGPIO(IOGetByTag(IO_TAG(CAN1_STANDBY)), IOCFG_OUT_PP);
++#endif
++#ifdef CAN2_STANDBY
++    IOInit(IOGetByTag(IO_TAG(CAN2_STANDBY)), OWNER_DRONECAN, RESOURCE_CAN_STANDBY, 1);
++    IOWrite(IOGetByTag(IO_TAG(CAN2_STANDBY)), !second);
++    IOConfigGPIO(IOGetByTag(IO_TAG(CAN2_STANDBY)), IOCFG_OUT_PP);
++#endif
++#else
++
+    // Set up the Rx and Tx pins for CAN1 and if present, the standby or listen only pin.
+ #if defined(CAN1_TX) && defined(CAN1_RX)
+     IOInit(IOGetByTag(IO_TAG(CAN1_TX)), OWNER_DRONECAN, RESOURCE_CAN_TX, 0);
+@@ -304,6 +340,8 @@ static void canardSTM32GPIO_Init(void)
+     IOConfigGPIO(IOGetByTag(IO_TAG(CAN1_STANDBY)), IOCFG_OUT_PP);
+     IOLo(IOGetByTag(IO_TAG(CAN1_STANDBY)));
+ #endif
++
++#endif
+ }
+ 
+ static bool canardSTM32ComputeTimings(const uint32_t target_bitrate, struct Timings *out_timings)
+diff --git a/src/main/drivers/dronecan/mybox_can.c b/src/main/drivers/dronecan/mybox_can.c
+new file mode 100644
+index 0000000..8f5dd6b
+--- /dev/null
++++ b/src/main/drivers/dronecan/mybox_can.c
+@@ -0,0 +1,9 @@
++// SPDX-License-Identifier: GPL-3.0-or-later
++#include "platform.h"
++#ifdef USE_MYBOX_CAN_SELECT
++#include "config/parameter_group.h"
++#include "config/parameter_group_ids.h"
++#include "drivers/dronecan/mybox_can.h"
++PG_REGISTER_WITH_RESET_TEMPLATE(myboxCanConfig_t, myboxCanConfig, PG_MYBOX_CAN_CONFIG, 1);
++PG_RESET_TEMPLATE(myboxCanConfig_t, myboxCanConfig, .bus = 1);
++#endif
+diff --git a/src/main/drivers/dronecan/mybox_can.h b/src/main/drivers/dronecan/mybox_can.h
+new file mode 100644
+index 0000000..e1fe162
+--- /dev/null
++++ b/src/main/drivers/dronecan/mybox_can.h
+@@ -0,0 +1,6 @@
++// SPDX-License-Identifier: GPL-3.0-or-later
++#pragma once
++#include <stdint.h>
++#include "config/parameter_group.h"
++typedef struct { uint8_t bus; } myboxCanConfig_t;
++PG_DECLARE(myboxCanConfig_t, myboxCanConfig);
+diff --git a/src/main/drivers/pitotmeter/pitotmeter_ms4525.c b/src/main/drivers/pitotmeter/pitotmeter_ms4525.c
+index c5272cc..5749db6 100644
+--- a/src/main/drivers/pitotmeter/pitotmeter_ms4525.c
++++ b/src/main/drivers/pitotmeter/pitotmeter_ms4525.c
+@@ -27,8 +27,9 @@
+ #include "drivers/time.h"
+ #include "drivers/pitotmeter/pitotmeter.h"
+ 
+-// MS4525, Standard address 0x28
+-#define MS4525_ADDR                 0x28
++#ifndef MS4525_PROBE_COUNT
++#define MS4525_PROBE_COUNT 1
++#endif
+ 
+ typedef struct __attribute__ ((__packed__)) ms4525Ctx_s {
+     bool     dataValid;
+@@ -119,20 +120,24 @@ static void ms4525_calculate(pitotDev_t * pitot, float *pressure, float *tempera
+ bool ms4525Detect(pitotDev_t * pitot)
+ {
+     uint8_t rxbuf[4];
+-    bool ack = false;
+-
+-    pitot->busDev = busDeviceInit(BUSTYPE_I2C, DEVHW_MS4525, 0, OWNER_AIRSPEED);
+-    if (pitot->busDev == NULL) {
+-        return false;
++    pitot->busDev = NULL;
++
++    for (uint8_t tag = 0; tag < MS4525_PROBE_COUNT; ++tag) {
++        busDevice_t *candidate = busDeviceInit(BUSTYPE_I2C, DEVHW_MS4525, tag, OWNER_AIRSPEED);
++        if (candidate == NULL) {
++            continue;
++        }
++
++        // Repeat the read so the sensor can recover from a previous START/STOP without clock pulses.
++        busReadBuf(candidate, 0xFF, rxbuf, sizeof(rxbuf));
++        if (busReadBuf(candidate, 0xFF, rxbuf, sizeof(rxbuf))) {
++            pitot->busDev = candidate;
++            break;
++        }
++
++        busDeviceDeInit(candidate);
+     }
+-
+-    // Read twice to fix:
+-    // Sending a start-stop condition without any transitions on the SCL line (no clock pulses in between) creates a
+-    // communication error for the next communication, even if the next start condition is correct and the clock pulse is applied.
+-    // An additional start condition must be sent, which results in restoration of proper communication.
+-    ack = busReadBuf(pitot->busDev, 0xFF, rxbuf, 4);
+-    ack = busReadBuf(pitot->busDev, 0xFF, rxbuf, 4);
+-    if (!ack) {
++    if (pitot->busDev == NULL) {
+         return false;
+     }
+ 
+diff --git a/src/main/drivers/pwm_output.c b/src/main/drivers/pwm_output.c
+index 20aed6c..1723eb9 100644
+--- a/src/main/drivers/pwm_output.c
++++ b/src/main/drivers/pwm_output.c
+@@ -777,7 +777,8 @@ bool pwmMotorConfig(const timerHardware_t *timerHardware, uint8_t motorIndex, bo
+         break;
+     }
+ 
+-    return (motors[motorIndex].pwmPort != NULL);
++    const pwmOutputPort_t *port = motors[motorIndex].pwmPort;
++    return port && port->configured;
+ }
+ 
+ // Helper function for ESC passthrough
+diff --git a/src/main/drivers/sdcard/sdcard_sdio.c b/src/main/drivers/sdcard/sdcard_sdio.c
+index f763775..25e1749 100644
+--- a/src/main/drivers/sdcard/sdcard_sdio.c
++++ b/src/main/drivers/sdcard/sdcard_sdio.c
+@@ -134,10 +134,18 @@ static sdcardReceiveBlockStatus_e sdcard_receiveDataBlock(uint8_t *buffer, int c
+         return SDCARD_RECEIVE_BLOCK_IN_PROGRESS;
+     }
+ 
+-    if (SD_GetState() != true) {
++    if (ret != SD_OK) {
+         return SDCARD_RECEIVE_ERROR;
+     }
+ 
++    if (!SD_GetState()) {
++#ifdef USE_MYBOX_SDMMC_RECOVERY
++        return SDCARD_RECEIVE_BLOCK_IN_PROGRESS;
++#else
++        return SDCARD_RECEIVE_ERROR;
++#endif
++    }
++
+     return SDCARD_RECEIVE_SUCCESS;
+ }
+ 
+@@ -291,9 +299,9 @@ static bool sdcardSdio_poll(void)
+                 goto doMore;
+             } // else keep waiting for the CID to arrive
+         break;
+-        case SDCARD_STATE_SENDING_WRITE:
+-            // Have we finished sending the write yet?
+-            if (SD_CheckWrite() == SD_OK) {
++        case SDCARD_STATE_SENDING_WRITE: {
++            const SD_Error_t status = SD_CheckWrite();
++            if (status == SD_OK) {
+ 
+                 // The SD card is now busy committing that write to the card
+                 sdcard.state = SDCARD_STATE_WAITING_FOR_WRITE;
+@@ -303,8 +311,20 @@ static bool sdcardSdio_poll(void)
+                 if (sdcard.pendingOperation.callback) {
+                     sdcard.pendingOperation.callback(SDCARD_BLOCK_OPERATION_WRITE, sdcard.pendingOperation.blockIndex, sdcard.pendingOperation.buffer, sdcard.pendingOperation.callbackData);
+                 }
++#ifdef USE_MYBOX_SDMMC_RECOVERY
++            } else if (status != SD_BUSY || millis() - sdcard.operationStartTime > SDCARD_TIMEOUT_WRITE_MSEC) {
++                if (status == SD_BUSY) {
++                    SD_RecordFailure("write DMA timeout", true);
++                }
++                if (sdcard.pendingOperation.callback) {
++                    sdcard.pendingOperation.callback(SDCARD_BLOCK_OPERATION_WRITE, sdcard.pendingOperation.blockIndex,
++                        NULL, sdcard.pendingOperation.callbackData);
++                }
++                sdcardSdio_reset();
++#endif
+             }
+-        break;
++            break;
++        }
+         case SDCARD_STATE_WAITING_FOR_WRITE:
+             if (SD_GetState()) {
+                 sdcard.failureCount = 0; // Assume the card is good if it can complete a write
+@@ -329,6 +349,9 @@ static bool sdcardSdio_poll(void)
+                  * their buffer and have no hope of retrying the operation. But this should be very rare and it allows
+                  * them to reuse their buffer milliseconds faster than they otherwise would.
+                  */
++#ifdef USE_MYBOX_SDMMC_RECOVERY
++                SD_RecordFailure("write CMD13 timeout", true);
++#endif
+                 sdcardSdio_reset();
+                 goto doMore;
+             }
+@@ -353,6 +376,9 @@ static bool sdcardSdio_poll(void)
+                     if (millis() <= sdcard.operationStartTime + SDCARD_TIMEOUT_READ_MSEC) {
+                         break; // Timeout not reached yet so keep waiting
+                     }
++#ifdef USE_MYBOX_SDMMC_RECOVERY
++                    SD_RecordFailure(SD_CheckRead() == SD_OK ? "read CMD13 timeout" : "read DMA timeout", true);
++#endif
+                     // Timeout has expired, so fall through to convert to a fatal error
+                     FALLTHROUGH;
+ 
+@@ -388,6 +414,9 @@ static bool sdcardSdio_poll(void)
+     // Is the card's initialization taking too long?
+     if (sdcard.state >= SDCARD_STATE_RESET && sdcard.state < SDCARD_STATE_READY
+             && millis() - sdcard.operationStartTime > SDCARD_TIMEOUT_INIT_MILLIS) {
++#ifdef USE_MYBOX_SDMMC_RECOVERY
++        SD_RecordFailure("card readiness timeout", true);
++#endif
+         sdcardSdio_reset();
+     }
+ 
+@@ -482,6 +511,9 @@ static sdcardOperationStatus_e sdcardSdio_writeBlock(uint32_t blockIndex, uint8_
+ 
+     // DMA started successfully - only set state after confirming operation will proceed
+     sdcard.state = SDCARD_STATE_SENDING_WRITE;
++#ifdef USE_MYBOX_SDMMC_RECOVERY
++    sdcard.operationStartTime = millis();
++#endif
+ 
+     // Success - reset retry counter
+     sdcard.operationRetries = 0;
+@@ -575,14 +607,6 @@ static bool sdcardSdio_readBlock(uint32_t blockIndex, uint8_t *buffer, sdcard_op
+         // Max retries exceeded, reset card
+         sdcard.operationRetries = 0;
+         sdcardSdio_reset();
+-        if (sdcard.pendingOperation.callback) {
+-            sdcard.pendingOperation.callback(
+-                SDCARD_BLOCK_OPERATION_READ,
+-                sdcard.pendingOperation.blockIndex,
+-                NULL,
+-                sdcard.pendingOperation.callbackData
+-            );
+-        }
+         return false;
+     }
+ }
+diff --git a/src/main/drivers/sdcard/sdmmc_sdio.h b/src/main/drivers/sdcard/sdmmc_sdio.h
+index 4c4e60c..d745ffd 100644
+--- a/src/main/drivers/sdcard/sdmmc_sdio.h
++++ b/src/main/drivers/sdcard/sdmmc_sdio.h
+@@ -211,6 +211,48 @@ void             SD_Initialize_LL            (DMA_t dma);
+ bool             SD_Initialize_LL            (DMA_t dma);
+ #endif
+ bool SD_Init(void);
++#ifdef USE_MYBOX_SDMMC_RECOVERY
++typedef struct {
++    const char *phase;
++    uint32_t error;
++    uint32_t sector;
++    uint32_t status;
++    uint32_t mask;
++    uint32_t dataCount;
++    uint32_t dataControl;
++    uint32_t dmaControl;
++    uint32_t dmaAddress;
++} sdmmcFailure_t;
++
++typedef struct {
++    const char *startupFailure;
++    uint32_t startupError;
++    uint32_t startupCommand;
++    uint32_t startupResponseCommand;
++    uint32_t startupResponse;
++    uint32_t startupStatus;
++    uint32_t transferError;
++    uint8_t busWidth;
++    uint32_t attempts;
++    uint32_t cardType;
++    uint32_t blocks;
++    uint32_t rca;
++    uint32_t cardState;
++    uint32_t cardResponse;
++    uint32_t cardError;
++    uint16_t bootSignature;
++    uint32_t bootPartitionTypes;
++    uint32_t reads;
++    uint32_t writes;
++    uint32_t irqCompletions;
++    uint32_t polledCompletions;
++    uint32_t failures;
++    sdmmcFailure_t firstFailure;
++} sdmmcDiagnostics_t;
++
++sdmmcDiagnostics_t SD_GetDiagnostics(void);
++void SD_RecordFailure(const char *phase, bool timeout);
++#endif
+ bool SD_IsDetected(void);
+ bool SD_GetState(void);
+ 
+diff --git a/src/main/drivers/sdcard/sdmmc_sdio_hal.c b/src/main/drivers/sdcard/sdmmc_sdio_hal.c
+index 23b9c34..91cf543 100644
+--- a/src/main/drivers/sdcard/sdmmc_sdio_hal.c
++++ b/src/main/drivers/sdcard/sdmmc_sdio_hal.c
+@@ -59,6 +59,28 @@ static SD_Handle_t SD_Handle;
+ static DMA_HandleTypeDef sd_dma;
+ static SD_HandleTypeDef hsd;
+ 
++#ifdef USE_MYBOX_SDMMC_RECOVERY
++static sdmmcDiagnostics_t sdDiagnostics = { .busWidth = 4 };
++static volatile bool sdTransferFailed;
++static bool sdStartupProbeDone;
++static uint32_t sdTransferSector;
++
++sdmmcDiagnostics_t SD_GetDiagnostics(void)
++{
++    return sdDiagnostics;
++}
++
++static void sdSetStartupFailure(const char *phase, uint32_t error)
++{
++    sdDiagnostics.startupFailure = phase;
++    sdDiagnostics.startupError = error;
++    sdDiagnostics.startupCommand = hsd.Instance->CMD & SDMMC_CMD_CMDINDEX;
++    sdDiagnostics.startupResponseCommand = hsd.Instance->RESPCMD & SDMMC_RESPCMD_RESPCMD;
++    sdDiagnostics.startupResponse = hsd.Instance->RESP1;
++    sdDiagnostics.startupStatus = hsd.Instance->STA;
++}
++#endif
++
+ typedef struct sdioPin_s {
+     ioTag_t pin;
+     uint8_t af;
+@@ -167,6 +189,101 @@ static const sdioHardware_t sdioPinHardware[SDIODEV_COUNT] = {
+ static const sdioHardware_t *sdioHardware;
+ static sdioPin_t sdioPin[SDIO_PIN_COUNT];
+ 
++#ifdef USE_MYBOX_SDMMC_RECOVERY
++#define SDMMC_TRANSFER_ERRORS (SDMMC_FLAG_IDMATE | SDMMC_FLAG_DCRCFAIL | SDMMC_FLAG_DTIMEOUT | \
++    SDMMC_FLAG_RXOVERR | SDMMC_FLAG_TXUNDERR)
++#define SDMMC_TRANSFER_EVENTS (SDMMC_TRANSFER_ERRORS | SDMMC_FLAG_DATAEND)
++
++static void sdCaptureFailure(const char *phase, uint32_t error, uint32_t status)
++{
++    sdDiagnostics.transferError = error;
++    ++sdDiagnostics.failures;
++    if (!sdDiagnostics.firstFailure.phase) {
++        const SDMMC_TypeDef *instance = hsd.Instance;
++        sdDiagnostics.firstFailure = (sdmmcFailure_t){
++            .phase = phase,
++            .error = error,
++            .sector = sdTransferSector,
++            .status = status,
++            .mask = instance->MASK,
++            .dataCount = instance->DCOUNT,
++            .dataControl = instance->DCTRL,
++            .dmaControl = instance->IDMACTRL,
++            .dmaAddress = instance->IDMABASE0,
++        };
++    }
++}
++
++void SD_RecordFailure(const char *phase, bool timeout)
++{
++    if (hsd.Instance && !sdTransferFailed) {
++        const uint32_t error = timeout ? HAL_SD_ERROR_TIMEOUT : HAL_SD_GetError(&hsd);
++        sdCaptureFailure(phase, error, hsd.Instance->STA);
++    }
++}
++
++static void sdServiceTransfer(bool fromIrq)
++{
++    if ((!SD_Handle.RXCplt && !SD_Handle.TXCplt) || sdTransferFailed) {
++        return;
++    }
++
++    const uint32_t status = hsd.Instance->STA;
++    if (status & SDMMC_TRANSFER_ERRORS) {
++        uint32_t error = 0;
++        if (status & SDMMC_FLAG_IDMATE) {
++            error |= HAL_SD_ERROR_DMA;
++        }
++        if (status & SDMMC_FLAG_DCRCFAIL) {
++            error |= HAL_SD_ERROR_DATA_CRC_FAIL;
++        }
++        if (status & SDMMC_FLAG_DTIMEOUT) {
++            error |= HAL_SD_ERROR_DATA_TIMEOUT;
++        }
++        if (status & SDMMC_FLAG_RXOVERR) {
++            error |= HAL_SD_ERROR_RX_OVERRUN;
++        }
++        if (status & SDMMC_FLAG_TXUNDERR) {
++            error |= HAL_SD_ERROR_TX_UNDERRUN;
++        }
++        sdCaptureFailure(SD_Handle.RXCplt ? "read hardware error" : "write hardware error", error, status);
++        sdTransferFailed = true;
++        // Keep the error snapshot and let the SD state machine reset the peripheral.
++        hsd.Instance->MASK = 0;
++        return;
++    }
++
++    if (status & SDMMC_FLAG_DATAEND) {
++        if (fromIrq) {
++            ++sdDiagnostics.irqCompletions;
++        } else {
++            ++sdDiagnostics.polledCompletions;
++        }
++        HAL_SD_IRQHandler(&hsd);
++    }
++}
++
++static void sdPollTransfer(void)
++{
++    if (!(hsd.Instance->STA & SDMMC_TRANSFER_EVENTS)) {
++        return;
++    }
++
++    // The IRQ can run between the flag check and disabling it. Recheck under the lock.
++    HAL_NVIC_DisableIRQ(sdioHardware->irqn);
++    sdServiceTransfer(false);
++    HAL_NVIC_EnableIRQ(sdioHardware->irqn);
++}
++
++static void sdPrepareTransfer(uint32_t sector)
++{
++    sdTransferFailed = false;
++    sdTransferSector = sector;
++    hsd.Instance->ICR = SDMMC_STATIC_DATA_FLAGS;
++    hsd.Instance->DCTRL = SDMMC_DCTRL_FIFORST;
++}
++#endif
++
+ void sdioPinConfigure(void)
+ {
+     if (SDCARD_SDIO_DEVICE == SDIOINVALID) {
+@@ -318,18 +435,37 @@ bool SD_Initialize_LL(DMA_t dma)
+ bool SD_GetState(void)
+ {
+     HAL_SD_CardStateTypedef cardState = HAL_SD_GetCardState(&hsd);
++#ifdef USE_MYBOX_SDMMC_RECOVERY
++    sdDiagnostics.cardState = cardState;
++    sdDiagnostics.cardResponse = hsd.Instance->RESP1;
++    if (cardState == 0) {
++        sdDiagnostics.cardError = HAL_SD_GetError(&hsd);
++    }
++#endif
+ 
+     return (cardState == HAL_SD_CARD_TRANSFER);
+ }
+ 
+-bool SD_Init(void)
++static bool sdInitCard(uint32_t divider, bool wideBus)
+ {
++#ifdef USE_MYBOX_SDMMC_RECOVERY
++    // Disable the old peripheral IRQ before replacing the handle during a retry.
++    HAL_NVIC_DisableIRQ(sdioHardware->irqn);
++    HAL_NVIC_ClearPendingIRQ(sdioHardware->irqn);
++    SD_Handle.RXCplt = 0;
++    SD_Handle.TXCplt = 0;
++    sdTransferFailed = false;
++    ++sdDiagnostics.attempts;
++#endif
+     memset(&hsd, 0, sizeof(hsd));
+ 
+     hsd.Instance = sdioHardware->instance;
+ 
+-    // falling seems to work better ?? no idea whats "right" here
++#ifdef USE_MYBOX_SDMMC_RECOVERY
++    hsd.Init.ClockEdge = SDMMC_CLOCK_EDGE_RISING;
++#else
+     hsd.Init.ClockEdge = SDMMC_CLOCK_EDGE_FALLING;
++#endif
+ 
+     // drastically increases the time to respond from the sdcard
+     // lets leave it off
+@@ -339,22 +475,38 @@ bool SD_Init(void)
+ #endif
+     hsd.Init.BusWide = SDMMC_BUS_WIDE_1B;
+     hsd.Init.HardwareFlowControl = SDMMC_HARDWARE_FLOW_CONTROL_ENABLE;
+-    hsd.Init.ClockDiv = SDMMC_CLK_DIV;
++    hsd.Init.ClockDiv = divider;
+ 
+     // Will call HAL_SD_MspInit
+     if (HAL_SD_Init(&hsd) != HAL_OK) {
+-        return SD_ERROR;
++#ifdef USE_MYBOX_SDMMC_RECOVERY
++        sdSetStartupFailure("card init", HAL_SD_GetError(&hsd));
++#endif
++        return false;
+     }
++#ifdef USE_MYBOX_SDMMC_RECOVERY
++    sdDiagnostics.cardType = hsd.SdCard.CardType;
++    sdDiagnostics.blocks = hsd.SdCard.LogBlockNbr;
++    sdDiagnostics.rca = hsd.SdCard.RelCardAdd;
++#endif
+     if (hsd.SdCard.BlockNbr == 0) {
+-        return SD_ERROR;
++#ifdef USE_MYBOX_SDMMC_RECOVERY
++        sdSetStartupFailure("card capacity", 0);
++#endif
++        return false;
+     }
+ 
+-#ifdef SDCARD_SDIO_4BIT
+-    if (HAL_SD_ConfigWideBusOperation(&hsd, SDMMC_BUS_WIDE_4B) != HAL_OK) {
+-        return SD_ERROR;
+-    }
++    if (wideBus && HAL_SD_ConfigWideBusOperation(&hsd, SDMMC_BUS_WIDE_4B) != HAL_OK) {
++#ifdef USE_MYBOX_SDMMC_RECOVERY
++        sdSetStartupFailure("4-bit switch", HAL_SD_GetError(&hsd));
+ #endif
++        return false;
++    }
+ 
++#ifdef USE_MYBOX_SDMMC_RECOVERY
++    // Until the type is accepted, an unrecognized card is a geometry failure.
++    const char *invalidCard = "card type";
++#endif
+     switch(hsd.SdCard.CardType) {
+     case CARD_SDSC:
+         switch (hsd.SdCard.CardVersion) {
+@@ -365,7 +517,10 @@ bool SD_Init(void)
+             SD_CardType = SD_STD_CAPACITY_V2_0;
+             break;
+         default:
+-            return SD_ERROR;
++#ifdef USE_MYBOX_SDMMC_RECOVERY
++            sdSetStartupFailure(invalidCard, 0);
++#endif
++            return false;
+         }
+         break;
+ 
+@@ -374,7 +529,10 @@ bool SD_Init(void)
+         break;
+ 
+     default:
+-        return SD_ERROR;
++#ifdef USE_MYBOX_SDMMC_RECOVERY
++        sdSetStartupFailure(invalidCard, 0);
++#endif
++        return false;
+     }
+ 
+     // STATIC_ASSERT(sizeof(SD_Handle.CSD) == sizeof(hsd.CSD), hal-csd-size-error);
+@@ -383,7 +541,56 @@ bool SD_Init(void)
+     // STATIC_ASSERT(sizeof(SD_Handle.CID) == sizeof(hsd.CID), hal-cid-size-error);
+     memcpy(&SD_Handle.CID, &hsd.CID, sizeof(SD_Handle.CID));
+ 
+-    return SD_OK;
++    return true;
++}
++
++#ifdef USE_MYBOX_SDMMC_RECOVERY
++static bool sdReadStartupBlock(void)
++{
++    static uint8_t sector[512];
++
++    // During startup, check the data path without depending on an IDMA interrupt.
++    // After mounting, Blackbox uses the normal asynchronous DMA path.
++    if (HAL_SD_ReadBlocks(&hsd, sector, 0, 1, 250) != HAL_OK) {
++        sdSetStartupFailure("polled read of sector 0", HAL_SD_GetError(&hsd));
++        return false;
++    }
++
++    sdDiagnostics.bootSignature = (uint16_t)sector[510] | ((uint16_t)sector[511] << 8);
++    sdDiagnostics.bootPartitionTypes = ((uint32_t)sector[450] << 24) | ((uint32_t)sector[466] << 16) |
++        ((uint32_t)sector[482] << 8) | sector[498];
++    return true;
++}
++#endif
++
++bool SD_Init(void)
++{
++    // The existing SD_Init interface returns false on success (SD_OK is zero).
++#ifdef USE_MYBOX_SDMMC_RECOVERY
++    if (!sdStartupProbeDone) {
++        sdStartupProbeDone = true;
++        if (sdInitCard(SDMMC_CLK_DIV, true) && sdReadStartupBlock()) {
++            return false;
++        }
++
++        // Retry once before starting Blackbox, with only DAT0 and a lower bus clock.
++        sdDiagnostics.busWidth = 1;
++        delay(20);
++        return !(sdInitCard(SDMMC_CLK_DIV * 2U, false) && sdReadStartupBlock());
++    }
++
++    if (sdDiagnostics.busWidth == 4 && sdDiagnostics.firstFailure.phase &&
++        !sdDiagnostics.irqCompletions && !sdDiagnostics.polledCompletions) {
++        // Try the conservative bus profile if the first asynchronous transfers fail.
++        sdDiagnostics.busWidth = 1;
++    }
++    const bool wideBus = sdDiagnostics.busWidth == 4;
++    return !sdInitCard(wideBus ? SDMMC_CLK_DIV : SDMMC_CLK_DIV * 2U, wideBus);
++#elif defined(SDCARD_SDIO_4BIT)
++    return !sdInitCard(SDMMC_CLK_DIV, true);
++#else
++    return !sdInitCard(SDMMC_CLK_DIV, false);
++#endif
+ }
+ 
+ SD_Error_t SD_GetCardInfo(void)
+@@ -588,11 +795,27 @@ SD_Error_t SD_GetCardInfo(void)
+ }
+ 
+ SD_Error_t SD_CheckWrite(void) {
++#ifdef USE_MYBOX_SDMMC_RECOVERY
++    if (SD_Handle.TXCplt && !sdTransferFailed) {
++        sdPollTransfer();
++    }
++    if (sdTransferFailed) {
++        return SD_ERROR;
++    }
++#endif
+     if (SD_Handle.TXCplt != 0) return SD_BUSY;
+     return SD_OK;
+ }
+ 
+ SD_Error_t SD_CheckRead(void) {
++#ifdef USE_MYBOX_SDMMC_RECOVERY
++    if (SD_Handle.RXCplt && !sdTransferFailed) {
++        sdPollTransfer();
++    }
++    if (sdTransferFailed) {
++        return SD_ERROR;
++    }
++#endif
+     if (SD_Handle.RXCplt != 0) return SD_BUSY;
+     return SD_OK;
+ }
+@@ -600,8 +823,6 @@ SD_Error_t SD_CheckRead(void) {
+ SD_Error_t SD_WriteBlocks_DMA(uint64_t WriteAddress, uint32_t *buffer, uint32_t BlockSize, uint32_t NumberOfBlocks)
+ {
+     SD_Error_t ErrorState = SD_OK;
+-    SD_Handle.TXCplt = 1;
+-
+     if (BlockSize != 512) {
+         return SD_ERROR; // unsupported.
+     }
+@@ -623,9 +844,20 @@ SD_Error_t SD_WriteBlocks_DMA(uint64_t WriteAddress, uint32_t *buffer, uint32_t
+         }
+     }
+ #endif
++#ifdef USE_MYBOX_SDMMC_RECOVERY
++    sdPrepareTransfer(WriteAddress);
++#endif
++    SD_Handle.TXCplt = 1;
+     if (HAL_SD_WriteBlocks_DMA(&hsd, (uint8_t *)buffer, WriteAddress, NumberOfBlocks) != HAL_OK) {
++        SD_Handle.TXCplt = 0;
++#ifdef USE_MYBOX_SDMMC_RECOVERY
++        SD_RecordFailure("write rejected", false);
++#endif
+         return SD_ERROR;
+     }
++#ifdef USE_MYBOX_SDMMC_RECOVERY
++    ++sdDiagnostics.writes;
++#endif
+ 
+     return ErrorState;
+ }
+@@ -652,8 +884,6 @@ SD_Error_t SD_ReadBlocks_DMA(uint64_t ReadAddress, uint32_t *buffer, uint32_t Bl
+     }
+ #endif
+ 
+-    SD_Handle.RXCplt = 1;
+-
+     sdReadParameters.buffer = buffer;
+     sdReadParameters.BlockSize = BlockSize;
+     sdReadParameters.NumberOfBlocks = NumberOfBlocks;
+@@ -666,9 +896,21 @@ SD_Error_t SD_ReadBlocks_DMA(uint64_t ReadAddress, uint32_t *buffer, uint32_t Bl
+         }
+     }
+ #endif
++#ifdef USE_MYBOX_SDMMC_RECOVERY
++    sdPrepareTransfer(ReadAddress);
++    SCB_InvalidateDCache_by_Addr(buffer, NumberOfBlocks * BlockSize);
++#endif
++    SD_Handle.RXCplt = 1;
+     if (HAL_SD_ReadBlocks_DMA(&hsd, (uint8_t *)buffer, ReadAddress, NumberOfBlocks) != HAL_OK) {
++        SD_Handle.RXCplt = 0;
++#ifdef USE_MYBOX_SDMMC_RECOVERY
++        SD_RecordFailure("read rejected", false);
++#endif
+         return SD_ERROR;
+     }
++#ifdef USE_MYBOX_SDMMC_RECOVERY
++    ++sdDiagnostics.reads;
++#endif
+ 
+     return ErrorState;
+ }
+@@ -707,6 +949,14 @@ void HAL_SD_RxCpltCallback(SD_HandleTypeDef *hsd)
+     SD_Handle.RXCplt = 0;
+ }
+ 
++#ifdef USE_MYBOX_SDMMC_RECOVERY
++void HAL_SD_ErrorCallback(SD_HandleTypeDef *sd)
++{
++    sdCaptureFailure("HAL transfer error", HAL_SD_GetError(sd), sd->Instance->STA);
++    sdTransferFailed = true;
++}
++#endif
++
+ void HAL_SD_AbortCallback(SD_HandleTypeDef *hsd)
+ {
+     UNUSED(hsd);
+@@ -717,12 +967,20 @@ void HAL_SD_AbortCallback(SD_HandleTypeDef *hsd)
+ 
+ void SDMMC1_IRQHandler(void)
+ {
++#ifdef USE_MYBOX_SDMMC_RECOVERY
++    sdServiceTransfer(true);
++#else
+     HAL_SD_IRQHandler(&hsd);
++#endif
+ }
+ 
+ void SDMMC2_IRQHandler(void)
+ {
++#ifdef USE_MYBOX_SDMMC_RECOVERY
++    sdServiceTransfer(true);
++#else
+     HAL_SD_IRQHandler(&hsd);
++#endif
+ }
+ 
+ #endif
+diff --git a/src/main/fc/cli.c b/src/main/fc/cli.c
+index 73c6591..66b1c8c 100644
+--- a/src/main/fc/cli.c
++++ b/src/main/fc/cli.c
+@@ -25,6 +25,9 @@
+ #include <ctype.h>
+ 
+ #include "platform.h"
++#ifdef USE_MYBOX_V2_SENSORS
++#include "mybox_sensors.h"
++#endif
+ 
+ bool cliMode = false;
+ 
+@@ -64,6 +67,11 @@ bool cliMode = false;
+ #include "drivers/osd_symbols.h"
+ #include "drivers/persistent.h"
+ #include "drivers/sdcard/sdcard.h"
++#ifdef USE_MYBOX_SDMMC_RECOVERY
++#include "blackbox/blackbox_io.h"
++#include "drivers/dma.h"
++#include "drivers/sdcard/sdmmc_sdio.h"
++#endif
+ #include "drivers/sensor.h"
+ #include "drivers/serial.h"
+ #include "drivers/stack_check.h"
+@@ -246,7 +254,7 @@ static const char *debugModeNames[DEBUG_COUNT] = {
+ // sync with gyroSensor_e
+ static const char *const gyroNames[] = {
+     "NONE",     "AUTO",   "MPU6000",  "MPU6500", "MPU9250", "BMI160",
+-    "ICM20689", "BMI088", "ICM42605", "BMI270",  "LSM6DXX", "ICM45686", "ICM40609D", "FAKE"};
++    "ICM20689", "BMI088", "ICM42605", "BMI270",  "LSM6DXX", "ICM45686", "ICM40609D", "FAKE", "ICM42670"};
+ 
+ // sync this with sensors_e
+ static const char * const sensorTypeNames[] = {
+@@ -2898,6 +2906,38 @@ static void cliSdInfo(char *cmdline)
+ {
+     UNUSED(cmdline);
+ 
++#ifdef USE_MYBOX_SDMMC_RECOVERY
++    if (blackboxConfig()->device != BLACKBOX_DEVICE_SDCARD) {
++        cliPrintLine("SD card: Select SDCARD as blackbox_device and reboot");
++        return;
++    }
++    const sdmmcDiagnostics_t diagnostics = SD_GetDiagnostics();
++    cliPrintLinef("SDMMC: %u-bit, init attempts %u, polling init %s (0x%08x)",
++        diagnostics.busWidth, (unsigned)diagnostics.attempts,
++        diagnostics.startupFailure ? diagnostics.startupFailure : "OK", (unsigned)diagnostics.startupError);
++    if (diagnostics.startupFailure) {
++        cliPrintLinef("Init registers: CMD%u RESPCMD=%u RESP1=%08x STA=%08x",
++            (unsigned)diagnostics.startupCommand, (unsigned)diagnostics.startupResponseCommand,
++            (unsigned)diagnostics.startupResponse, (unsigned)diagnostics.startupStatus);
++    }
++    cliPrintLinef("Card: type %u, %u blocks, RCA 0x%04x, CMD13 state %u, R1 0x%08x, error 0x%08x",
++        (unsigned)diagnostics.cardType, (unsigned)diagnostics.blocks, (unsigned)diagnostics.rca,
++        (unsigned)diagnostics.cardState, (unsigned)diagnostics.cardResponse, (unsigned)diagnostics.cardError);
++    cliPrintLinef("LBA0: signature 0x%04x, MBR type bytes 0x%08x",
++        diagnostics.bootSignature, (unsigned)diagnostics.bootPartitionTypes);
++    cliPrintLinef("Transfer: reads %u, writes %u, IRQ %u, polled %u, failures %u, last error 0x%08x",
++        (unsigned)diagnostics.reads, (unsigned)diagnostics.writes, (unsigned)diagnostics.irqCompletions,
++        (unsigned)diagnostics.polledCompletions, (unsigned)diagnostics.failures, (unsigned)diagnostics.transferError);
++    const sdmmcFailure_t *failure = &diagnostics.firstFailure;
++    if (failure->phase) {
++        cliPrintLinef("First failure: %s, LBA %u, error 0x%08x", failure->phase,
++            (unsigned)failure->sector, (unsigned)failure->error);
++        cliPrintLinef("Registers: STA=%08x MASK=%08x DCOUNT=%08x DCTRL=%08x IDMACTRL=%08x IDMABASE0=%08x",
++            (unsigned)failure->status, (unsigned)failure->mask, (unsigned)failure->dataCount,
++            (unsigned)failure->dataControl, (unsigned)failure->dmaControl, (unsigned)failure->dmaAddress);
++    }
++#endif
++
+     cliPrint("SD card: ");
+ 
+     if (!sdcard_isInserted()) {
+@@ -2906,7 +2946,13 @@ static void cliSdInfo(char *cmdline)
+     }
+ 
+     if (!sdcard_isInitialized()) {
++#ifdef USE_MYBOX_SDMMC_RECOVERY
++        cliPrintLinef("Startup failed, driver %s, filesystem state %u error %u",
++            sdcard_isFunctional() ? "initializing" : "disabled",
++            (unsigned)afatfs_getFilesystemState(), (unsigned)afatfs_getLastError());
++#else
+         cliPrintLine("Startup failed");
++#endif
+         return;
+     }
+ 
+@@ -2938,7 +2984,7 @@ static void cliSdInfo(char *cmdline)
+ 
+             switch (afatfs_getLastError()) {
+                 case AFATFS_ERROR_BAD_MBR:
+-                    cliPrint(" - no FAT MBR partitions");
++                    cliPrint(" - no FAT16/FAT32 boot sector or MBR partition");
+                 break;
+                 case AFATFS_ERROR_BAD_FILESYSTEM_HEADER:
+                     cliPrint(" - bad FAT header");
+@@ -4189,6 +4235,26 @@ static void cliStatus(char *cmdline)
+ #endif // for if at32
+ #endif // for SITL
+ 
++#ifdef USE_MYBOX_VIB
++    cliPrintLinef("MYBOX active IMU: %d (preferred %d)",
++        sensors(SENSOR_GYRO) ? myboxActiveImuIndex() : -1, gyroConfig()->gyro_to_use);
++    cliPrintLinef("MYBOX active barometer: %d (preferred %d)",
++        myboxActiveBarometerIndex(), myboxSensorConfig()->barometerIndex);
++    for (uint8_t index = 0; index < 2; ++index) {
++        int16_t temperature;
++        int32_t pressure;
++        if (myboxImuSample(index, &temperature)) {
++            cliPrintLinef("MYBOX IMU %d: OK, temperature %d dC", index, temperature);
++        } else {
++            cliPrintLinef("MYBOX IMU %d: no valid sample", index);
++        }
++        if (myboxBarometerSample(index, &pressure)) {
++            cliPrintLinef("MYBOX barometer %d: %ld Pa", index, (long)pressure);
++        } else {
++            cliPrintLinef("MYBOX barometer %d: no valid sample", index);
++        }
++    }
++#endif
+     cliPrintLinef("Sensor status: GYRO=%s, ACC=%s, MAG=%s, BARO=%s, RANGEFINDER=%s, OPFLOW=%s, PITOT=%s, GPS=%s",
+         hardwareSensorStatusNames[getHwGyroStatus()],
+         hardwareSensorStatusNames[getHwAccelerometerStatus()],
+diff --git a/src/main/fc/fc_init.c b/src/main/fc/fc_init.c
+index 9ba5a8e..f3f211e 100644
+--- a/src/main/fc/fc_init.c
++++ b/src/main/fc/fc_init.c
+@@ -20,6 +20,9 @@
+ #include <string.h>
+ 
+ #include "platform.h"
++#ifdef USE_MYBOX_V2_SENSORS
++#include "mybox_sensors.h"
++#endif
+ 
+ #include "blackbox/blackbox.h"
+ #include "blackbox/blackbox_io.h"
+@@ -590,6 +593,9 @@ void init(void)
+         failureMode(FAILURE_MISSING_ACC);
+     }
+ 
++#ifdef USE_MYBOX_V2_SENSORS
++    myboxSensorsInit();
++#endif
+     systemState |= SYSTEM_STATE_SENSORS_READY;
+ 
+     flashLedsAndBeep();
+diff --git a/src/main/fc/fc_tasks.c b/src/main/fc/fc_tasks.c
+index 31143e9..c91b771 100755
+--- a/src/main/fc/fc_tasks.c
++++ b/src/main/fc/fc_tasks.c
+@@ -20,6 +20,9 @@
+ #include <stdint.h>
+ 
+ #include "platform.h"
++#ifdef USE_MYBOX_V2_SENSORS
++#include "mybox_sensors.h"
++#endif
+ 
+ #include "cms/cms.h"
+ 
+@@ -162,6 +165,9 @@ void taskUpdateTemperature(timeUs_t currentTimeUs)
+ {
+     UNUSED(currentTimeUs);
+     temperatureUpdate();
++#ifdef USE_MYBOX_V2_SENSORS
++    myboxSensorsUpdate();
++#endif
+ }
+ 
+ #ifdef USE_GPS
+@@ -205,6 +211,11 @@ void taskUpdateBaro(timeUs_t currentTimeUs)
+         rescheduleTask(TASK_SELF, newDeadline);
+     }
+ 
++#ifdef USE_MYBOX_V2_SENSORS
++    if (!baroIsHealthy()) {
++        return;
++    }
++#endif
+     updatePositionEstimator_BaroTopic(currentTimeUs);
+ }
+ #endif
+diff --git a/src/main/fc/settings.yaml b/src/main/fc/settings.yaml
+index f805e60..6696c40 100644
+--- a/src/main/fc/settings.yaml
++++ b/src/main/fc/settings.yaml
+@@ -2,13 +2,13 @@ tables:
+   - name: alignment
+     values: ["DEFAULT", "CW0", "CW90", "CW180", "CW270", "CW0FLIP", "CW90FLIP", "CW180FLIP", "CW270FLIP"]
+   - name: acc_hardware
+-    values: ["NONE", "AUTO", "MPU6000", "MPU6500", "MPU9250", "BMI160", "ICM20689", "BMI088", "ICM42605", "BMI270","LSM6DXX", "ICM45686", "ICM40609D", "FAKE"]
++    values: ["NONE", "AUTO", "MPU6000", "MPU6500", "MPU9250", "BMI160", "ICM20689", "BMI088", "ICM42605", "BMI270","LSM6DXX", "ICM45686", "ICM40609D", "FAKE", "ICM42670"]
+     enum: accelerationSensor_e
+   - name: rangefinder_hardware
+     values: ["NONE", "SRF10", "VL53L0X", "MSP", "BENEWAKE", "VL53L1X", "US42", "TOF10120_I2C", "FAKE", "TERARANGER_EVO", "USD1_V0", "NRA"]
+     enum: rangefinderType_e
+   - name: mag_hardware
+-    values: ["NONE", "AUTO", "HMC5883", "AK8975", "MAG3110", "AK8963", "IST8310", "QMC5883", "QMC5883P", "MPU9250", "IST8308", "LIS3MDL", "MSP", "RM3100", "VCM5883", "MLX90393", "LIS2MDL", "FAKE"]
++    values: ["NONE", "AUTO", "HMC5883", "AK8975", "MAG3110", "AK8963", "IST8310", "QMC5883", "QMC5883P", "MPU9250", "IST8308", "LIS3MDL", "MSP", "RM3100", "VCM5883", "MLX90393", "LIS2MDL", "FAKE", "DRONECAN"]
+     enum: magSensor_e
+   - name: opflow_hardware
+     values: ["NONE", "CXOF", "MSP", "FAKE"]
+@@ -903,6 +903,36 @@ groups:
+         max: 255
+         default_value: 14
+ 
++  - name: PG_MYBOX_RCIN_CONFIG
++    condition: USE_MYBOX_RCIN
++    type: myboxRcinConfig_t
++    headers: ["mybox_rcin.h"]
++    members:
++      - name: mybox_sbus_rcin
++        description: "Receive SBUS on the dedicated MYBOX RCIN contact."
++        field: sbusEnabled
++        default_value: "OFF"
++        table: off_on
++
++  - name: PG_MYBOX_SENSOR_CONFIG
++    condition: USE_MYBOX_V2_SENSORS
++    type: myboxSensorConfig_t
++    headers: ["mybox_sensors.h"]
++    members:
++      - name: mybox_heater_target
++        description: "IMU heater target in degrees C. 0 disables heating."
++        field: heaterTargetC
++        default_value: 0
++        min: 0
++        max: 45
++      - name: mybox_baro_to_use
++        description: "Preferred barometer. 0 is the main board, 1 is the J19 module."
++        condition: USE_MYBOX_VIB
++        field: barometerIndex
++        default_value: 1
++        min: 0
++        max: 1
++
+   - name: PG_FAILSAFE_CONFIG
+     type: failsafeConfig_t
+     headers: ["flight/failsafe.h"]
+@@ -4867,6 +4897,17 @@ groups:
+       field: ledstrip_rainbow_delta_deg
+       min: 0
+       max: 359
++  - name: PG_MYBOX_CAN_CONFIG
++    type: myboxCanConfig_t
++    headers: ["drivers/dronecan/mybox_can.h"]
++    condition: USE_MYBOX_CAN_SELECT
++    members:
++      - name: dronecan_bus
++        description: "MYBOX physical CAN interface. One interface is active at a time; save and reboot after changing."
++        field: bus
++        min: 1
++        max: 2
++        default_value: 1
+   - name: PG_DRONECAN_CONFIG
+     type: dronecanConfig_t
+     headers: ["drivers/dronecan/dronecan.h"]
+diff --git a/src/main/io/asyncfatfs/asyncfatfs.c b/src/main/io/asyncfatfs/asyncfatfs.c
+index cfa7da7..a66a9fc 100644
+--- a/src/main/io/asyncfatfs/asyncfatfs.c
++++ b/src/main/io/asyncfatfs/asyncfatfs.c
+@@ -42,6 +42,7 @@
+ 
+ // FAT filesystems are allowed to differ from these parameters, but we choose not to support those weird filesystems:
+ #define AFATFS_SECTOR_SIZE  512
++#define AFATFS_MBR_PARTITIONS 4
+ #define AFATFS_NUM_FATS     2
+ 
+ // One handle is held long-term by the terrain module (kept-open .DAT tile file) in addition to the
+@@ -410,6 +411,7 @@ typedef struct afatfsFile_t {
+ typedef enum {
+     AFATFS_INITIALIZATION_READ_MBR,
+     AFATFS_INITIALIZATION_READ_VOLUME_ID,
++    AFATFS_INITIALIZATION_OPEN_ROOT,
+ 
+ #ifdef AFATFS_USE_FREEFILE
+     AFATFS_INITIALIZATION_FREEFILE_CREATE,
+@@ -423,6 +425,11 @@ typedef enum {
+     AFATFS_INITIALIZATION_DONE
+ } afatfsInitializationPhase_e;
+ 
++typedef struct {
++    uint32_t startSector;
++    uint32_t sectorCount;
++} afatfsPartition_t;
++
+ typedef struct afatfs_t {
+     fatFilesystemType_e filesystemType;
+ 
+@@ -430,12 +437,17 @@ typedef struct afatfs_t {
+     afatfsInitializationPhase_e initPhase;
+ 
+     // State used during FS initialisation where only one member of the union is used at a time
+-#ifdef AFATFS_USE_FREEFILE
+     union {
++        struct {
++            afatfsPartition_t partitions[AFATFS_MBR_PARTITIONS];
++            uint8_t count;
++            uint8_t index;
++        } partitionProbe;
++#ifdef AFATFS_USE_FREEFILE
+         afatfsFreeSpaceSearch_t freeSpaceSearch;
+         afatfsFreeSpaceFAT_t freeSpaceFAT;
+-    } initState;
+ #endif
++    } initState;
+ 
+ #ifdef STM32H7
+     uint8_t *cache;
+@@ -461,8 +473,6 @@ typedef struct afatfs_t {
+     // The current working directory:
+     afatfsFile_t currentDirectory;
+ 
+-    uint32_t partitionStartSector; // The physical sector that the first partition on the device begins at
+-
+     uint32_t fatStartSector; // The first sector of the first FAT
+     uint32_t fatSectors;     // The size in sectors of a single FAT
+ 
+@@ -908,7 +918,7 @@ static uint32_t afatfs_fileClusterToPhysical(uint32_t clusterNumber, uint32_t se
+ static uint32_t afatfs_fileGetCursorPhysicalSector(afatfsFilePtr_t file)
+ {
+     if (file->type == AFATFS_FILE_TYPE_FAT16_ROOT_DIRECTORY) {
+-        return afatfs.fatStartSector + AFATFS_NUM_FATS * afatfs.fatSectors + file->cursorOffset / AFATFS_SECTOR_SIZE;
++        return afatfs.clusterStartSector - afatfs.rootDirectorySectors + file->cursorOffset / AFATFS_SECTOR_SIZE;
+     } else {
+         uint32_t cursorSectorInCluster = afatfs_sectorIndexInCluster(file->cursorOffset);
+         return afatfs_fileClusterToPhysical(file->cursorCluster, cursorSectorInCluster);
+@@ -1012,86 +1022,88 @@ static afatfsOperationStatus_e afatfs_cacheSector(uint32_t physicalSectorIndex,
+     }
+ }
+ 
+-/**
+- * Parse the details out of the given MBR sector (512 bytes long). Return true if a compatible filesystem was found.
+- */
+-static bool afatfs_parseMBR(const uint8_t *sector)
++static bool afatfs_parseMBR(const uint8_t *sector, uint32_t diskSectors)
+ {
+-    // Check MBR signature
+-    if (sector[AFATFS_SECTOR_SIZE - 2] != 0x55 || sector[AFATFS_SECTOR_SIZE - 1] != 0xAA)
++    if (sector[510] != 0x55 || sector[511] != 0xaa) {
+         return false;
++    }
+ 
+-    mbrPartitionEntry_t *partition = (mbrPartitionEntry_t *) (sector + 446);
+-
+-    for (int i = 0; i < 4; i++) {
+-        if (
+-            partition[i].lbaBegin > 0
+-            && (
+-                partition[i].type == MBR_PARTITION_TYPE_FAT32
+-                || partition[i].type == MBR_PARTITION_TYPE_FAT32_LBA
+-                || partition[i].type == MBR_PARTITION_TYPE_FAT16
+-                || partition[i].type == MBR_PARTITION_TYPE_FAT16_LBA
+-            )
+-        ) {
+-            afatfs.partitionStartSector = partition[i].lbaBegin;
++    const mbrPartitionEntry_t *entries = (const mbrPartitionEntry_t *)(sector + 446);
++    afatfs.initState.partitionProbe.count = 0;
++    afatfs.initState.partitionProbe.index = 0;
++
++    // Keep the original preference for FAT partition types. A different type can still contain a valid FAT volume.
++    for (unsigned pass = 0; pass < 2; ++pass) {
++        for (unsigned i = 0; i < AFATFS_MBR_PARTITIONS; ++i) {
++            const mbrPartitionEntry_t *entry = &entries[i];
++            const uint8_t type = entry->type;
++            const bool fat = type == 0x04 || type == MBR_PARTITION_TYPE_FAT16 || type == MBR_PARTITION_TYPE_FAT16_LBA
++                || type == MBR_PARTITION_TYPE_FAT32 || type == MBR_PARTITION_TYPE_FAT32_LBA;
++            if (fat != (pass == 0) || type == 0 || type == 0x05 || type == 0x0f || type == 0x85 || type == 0xee
++                || entry->lbaBegin == 0 || entry->lbaBegin >= diskSectors || entry->numSectors == 0
++                || entry->numSectors > diskSectors - entry->lbaBegin) {
++                continue;
++            }
+ 
+-            return true;
++            afatfsPartition_t *partition = &afatfs.initState.partitionProbe.partitions[afatfs.initState.partitionProbe.count++];
++            partition->startSector = entry->lbaBegin;
++            partition->sectorCount = entry->numSectors;
+         }
+     }
+ 
+-    return false;
++    return afatfs.initState.partitionProbe.count > 0;
+ }
+ 
+-static bool afatfs_parseVolumeID(const uint8_t *sector)
++static bool afatfs_parseVolumeID(const uint8_t *sector, uint32_t startSector, uint32_t sectorCount)
+ {
+-    fatVolumeID_t *volume = (fatVolumeID_t *) sector;
+-
+-    afatfs.filesystemType = FAT_FILESYSTEM_TYPE_INVALID;
++    const fatVolumeID_t *volume = (const fatVolumeID_t *)sector;
++    const uint32_t sectorsPerCluster = volume->sectorsPerCluster;
+ 
+-    if (volume->bytesPerSector != AFATFS_SECTOR_SIZE || volume->numFATs != AFATFS_NUM_FATS
+-            || sector[510] != FAT_VOLUME_ID_SIGNATURE_1 || sector[511] != FAT_VOLUME_ID_SIGNATURE_2) {
++    if (volume->bytesPerSector != AFATFS_SECTOR_SIZE || volume->numFATs < 1 || volume->numFATs > 2
++        || volume->reservedSectorCount == 0
++        || sector[510] != FAT_VOLUME_ID_SIGNATURE_1 || sector[511] != FAT_VOLUME_ID_SIGNATURE_2
++        || sectorsPerCluster == 0 || sectorsPerCluster > 128 || !isPowerOfTwo(sectorsPerCluster)) {
+         return false;
+     }
+ 
+-    afatfs.fatStartSector = afatfs.partitionStartSector + volume->reservedSectorCount;
+-
+-    afatfs.sectorsPerCluster = volume->sectorsPerCluster;
+-    if (afatfs.sectorsPerCluster < 1 || afatfs.sectorsPerCluster > 128 || !isPowerOfTwo(afatfs.sectorsPerCluster)) {
++    const uint32_t fatSectors = volume->FATSize16 != 0 ? volume->FATSize16 : volume->fatDescriptor.fat32.FATSize32;
++    const uint32_t rootSectors = (volume->rootEntryCount * FAT_DIRECTORY_ENTRY_SIZE + AFATFS_SECTOR_SIZE - 1) / AFATFS_SECTOR_SIZE;
++    const uint32_t totalSectors = volume->totalSectors16 != 0 ? volume->totalSectors16 : volume->totalSectors32;
++    const uint64_t metadataSectors = volume->reservedSectorCount + (uint64_t)volume->numFATs * fatSectors + rootSectors;
++    if (fatSectors == 0 || totalSectors > sectorCount || metadataSectors >= totalSectors) {
+         return false;
+     }
+ 
+-    afatfs.byteInClusterMask = AFATFS_SECTOR_SIZE * afatfs.sectorsPerCluster - 1;
+-
+-    afatfs.fatSectors = volume->FATSize16 != 0 ? volume->FATSize16 : volume->fatDescriptor.fat32.FATSize32;
+-
+-    // Always zero on FAT32 since rootEntryCount is always zero (this is non-zero on FAT16)
+-    afatfs.rootDirectorySectors = ((volume->rootEntryCount * FAT_DIRECTORY_ENTRY_SIZE) + (volume->bytesPerSector - 1)) / volume->bytesPerSector;
+-    uint32_t totalSectors = volume->totalSectors16 != 0 ? volume->totalSectors16 : volume->totalSectors32;
+-    uint32_t dataSectors = totalSectors - (volume->reservedSectorCount + (AFATFS_NUM_FATS * afatfs.fatSectors) + afatfs.rootDirectorySectors);
+-
+-    afatfs.numClusters = dataSectors / volume->sectorsPerCluster;
++    const uint32_t numClusters = (totalSectors - (uint32_t)metadataSectors) / sectorsPerCluster;
++    if (numClusters <= FAT12_MAX_CLUSTERS || numClusters >= 0x0ffffff5) {
++        return false;
++    }
+ 
+-    if (afatfs.numClusters <= FAT12_MAX_CLUSTERS) {
+-        afatfs.filesystemType = FAT_FILESYSTEM_TYPE_FAT12;
++    const bool fat32 = numClusters > FAT16_MAX_CLUSTERS;
++    const uint32_t rootCluster = fat32 ? volume->fatDescriptor.fat32.rootCluster : 0;
++    const uint32_t entriesPerSector = fat32 ? AFATFS_FAT32_FAT_ENTRIES_PER_SECTOR : AFATFS_FAT16_FAT_ENTRIES_PER_SECTOR;
+ 
+-        return false; // FAT12 is not a supported filesystem
+-    } else if (afatfs.numClusters <= FAT16_MAX_CLUSTERS) {
+-        afatfs.filesystemType = FAT_FILESYSTEM_TYPE_FAT16;
+-    } else {
+-        afatfs.filesystemType = FAT_FILESYSTEM_TYPE_FAT32;
++    if ((uint64_t)fatSectors * entriesPerSector < (uint64_t)numClusters + FAT_SMALLEST_LEGAL_CLUSTER_NUMBER) {
++        return false;
+     }
+-
+-    if (afatfs.filesystemType == FAT_FILESYSTEM_TYPE_FAT32) {
+-        afatfs.rootDirectoryCluster = volume->fatDescriptor.fat32.rootCluster;
+-    } else {
+-        // FAT16 doesn't store the root directory in clusters
+-        afatfs.rootDirectoryCluster = 0;
++    if (fat32) {
++        if (volume->FATSize16 != 0 || volume->rootEntryCount != 0 || volume->fatDescriptor.fat32.fsVer != 0
++            || rootCluster < FAT_SMALLEST_LEGAL_CLUSTER_NUMBER || rootCluster > numClusters + 1) {
++            return false;
++        }
++    } else if (volume->FATSize16 == 0 || volume->rootEntryCount == 0) {
++        return false;
+     }
+ 
+-    uint32_t endOfFATs = afatfs.fatStartSector + AFATFS_NUM_FATS * afatfs.fatSectors;
+-
+-    afatfs.clusterStartSector = endOfFATs + afatfs.rootDirectorySectors;
+-
++    afatfs.filesystemType = fat32 ? FAT_FILESYSTEM_TYPE_FAT32 : FAT_FILESYSTEM_TYPE_FAT16;
++    afatfs.fatStartSector = startSector + volume->reservedSectorCount;
++    afatfs.fatSectors = fatSectors;
++    afatfs.sectorsPerCluster = sectorsPerCluster;
++    afatfs.byteInClusterMask = AFATFS_SECTOR_SIZE * sectorsPerCluster - 1;
++    afatfs.rootDirectorySectors = rootSectors;
++    afatfs.numClusters = numClusters;
++    afatfs.rootDirectoryCluster = rootCluster;
++    afatfs.clusterStartSector = startSector + (uint32_t)metadataSectors;
+     return true;
+ }
+ 
+@@ -3534,28 +3546,39 @@ static void afatfs_initContinue(void)
+     switch (afatfs.initPhase) {
+         case AFATFS_INITIALIZATION_READ_MBR:
+             if (afatfs_cacheSector(0, &sector, AFATFS_CACHE_READ | AFATFS_CACHE_DISCARDABLE, 0) == AFATFS_OPERATION_SUCCESS) {
+-                if (afatfs_parseMBR(sector)) {
++                const uint32_t diskSectors = sdcard_getMetadata()->numBlocks;
++                const bool bootJump = sector[0] == 0xeb || sector[0] == 0xe9 || sector[0] == 0xe8;
++                if (bootJump && afatfs_parseVolumeID(sector, 0, diskSectors)) {
++                    afatfs.initPhase = AFATFS_INITIALIZATION_OPEN_ROOT;
++                    goto doMore;
++                }
++                if (afatfs_parseMBR(sector, diskSectors)) {
+                     afatfs.initPhase = AFATFS_INITIALIZATION_READ_VOLUME_ID;
+                     goto doMore;
+-                } else {
+-                    afatfs.lastError = AFATFS_ERROR_BAD_MBR;
+-                    afatfs.filesystemState = AFATFS_FILESYSTEM_STATE_FATAL;
+                 }
++                afatfs.lastError = AFATFS_ERROR_BAD_MBR;
++                afatfs.filesystemState = AFATFS_FILESYSTEM_STATE_FATAL;
+             }
+-        break;
+-        case AFATFS_INITIALIZATION_READ_VOLUME_ID:
+-            if (afatfs_cacheSector(afatfs.partitionStartSector, &sector, AFATFS_CACHE_READ | AFATFS_CACHE_DISCARDABLE, 0) == AFATFS_OPERATION_SUCCESS) {
+-                if (afatfs_parseVolumeID(sector)) {
+-                    // Open the root directory
+-                    afatfs_chdir(NULL);
+-
+-                    afatfs.initPhase++;
+-                } else {
+-                    afatfs.lastError = AFATFS_ERROR_BAD_FILESYSTEM_HEADER;
+-                    afatfs.filesystemState = AFATFS_FILESYSTEM_STATE_FATAL;
++            break;
++        case AFATFS_INITIALIZATION_READ_VOLUME_ID: {
++            const afatfsPartition_t *partition = &afatfs.initState.partitionProbe.partitions[afatfs.initState.partitionProbe.index];
++            if (afatfs_cacheSector(partition->startSector, &sector, AFATFS_CACHE_READ | AFATFS_CACHE_DISCARDABLE, 0) == AFATFS_OPERATION_SUCCESS) {
++                if (afatfs_parseVolumeID(sector, partition->startSector, partition->sectorCount)) {
++                    afatfs.initPhase = AFATFS_INITIALIZATION_OPEN_ROOT;
++                    goto doMore;
++                }
++                if (++afatfs.initState.partitionProbe.index < afatfs.initState.partitionProbe.count) {
++                    goto doMore;
+                 }
++                afatfs.lastError = AFATFS_ERROR_BAD_FILESYSTEM_HEADER;
++                afatfs.filesystemState = AFATFS_FILESYSTEM_STATE_FATAL;
+             }
+-        break;
++            break;
++        }
++        case AFATFS_INITIALIZATION_OPEN_ROOT:
++            afatfs_chdir(NULL);
++            afatfs.initPhase++;
++            break;
+ 
+ #ifdef AFATFS_USE_FREEFILE
+         case AFATFS_INITIALIZATION_FREEFILE_CREATE:
+diff --git a/src/main/rx/sbus.c b/src/main/rx/sbus.c
+index f08267e..d951ad3 100644
+--- a/src/main/rx/sbus.c
++++ b/src/main/rx/sbus.c
+@@ -40,6 +40,10 @@
+ #include "rx/sbus.h"
+ #include "rx/sbus_channels.h"
+ 
++#ifdef USE_MYBOX_RCIN
++#include "mybox_rcin.h"
++#endif
++
+ /*
+  * Observations
+  *
+@@ -238,6 +242,12 @@ static bool sbusInitEx(const rxConfig_t *rxConfig, rxRuntimeConfig_t *rxRuntimeC
+ 
+     rxRuntimeConfig->rcFrameStatusFn = sbusFrameStatus;
+ 
++#ifdef USE_MYBOX_RCIN
++    if (rxConfig->serialrx_provider == SERIALRX_SBUS && myboxRcinConfig()->sbusEnabled) {
++        return myboxRcinSbusInit(sbusDataReceive, &sbusFrameData, !rxConfig->serialrx_inverted);
++    }
++#endif
++
+     const serialPortConfig_t *portConfig = findSerialPortConfig(FUNCTION_RX_SERIAL);
+     if (!portConfig) {
+         return false;
+diff --git a/src/main/sensors/acceleration.c b/src/main/sensors/acceleration.c
+index 88d98f7..b18d51f 100644
+--- a/src/main/sensors/acceleration.c
++++ b/src/main/sensors/acceleration.c
+@@ -45,6 +45,7 @@
+ #include "drivers/accgyro/accgyro_bmi270.h"
+ #include "drivers/accgyro/accgyro_icm20689.h"
+ #include "drivers/accgyro/accgyro_icm42605.h"
++#include "drivers/accgyro/accgyro_icm42670.h"
+ #include "drivers/accgyro/accgyro_icm45686.h"
+ #include "drivers/accgyro/accgyro_icm40609d.h"
+ #include "drivers/accgyro/accgyro_lsm6dxx.h"
+@@ -87,7 +88,11 @@ static EXTENDED_FASTRAM void *accNotchFilter[XYZ_AXIS_COUNT];
+ static EXTENDED_FASTRAM float fAccZero[XYZ_AXIS_COUNT];
+ static EXTENDED_FASTRAM float fAccGain[XYZ_AXIS_COUNT];
+ 
++#ifdef USE_MYBOX_VIB
++PG_REGISTER_WITH_RESET_FN(accelerometerConfig_t, accelerometerConfig, PG_ACCELEROMETER_CONFIG, 7);
++#else
+ PG_REGISTER_WITH_RESET_FN(accelerometerConfig_t, accelerometerConfig, PG_ACCELEROMETER_CONFIG, 6);
++#endif
+ 
+ void pgResetFn_accelerometerConfig(accelerometerConfig_t *instance)
+ {
+@@ -111,7 +116,23 @@ void pgResetFn_accelerometerConfig(accelerometerConfig_t *instance)
+     );
+ }
+ 
++#ifdef USE_MYBOX_VIB
++static bool accCalibrationMatchesImu(void)
++{
++    return accelerometerConfig()->calibrationImu == myboxActiveImuIndex() + 1;
++}
++#endif
++
+ static void updateAccCoefficients(void) {
++#ifdef USE_MYBOX_VIB
++    if (!accCalibrationMatchesImu()) {
++        for (unsigned axis = 0; axis < XYZ_AXIS_COUNT; axis++) {
++            fAccZero[axis] = 0.0f;
++            fAccGain[axis] = 1.0f;
++        }
++        return;
++    }
++#endif
+ 
+     for (uint8_t i = 0; i < XYZ_AXIS_COUNT; i++) {
+         //Float zero
+@@ -273,6 +294,17 @@ static bool accDetect(accDev_t *dev, accelerationSensor_e accHardwareToUse)
+         }
+         FALLTHROUGH;
+ #endif
++#ifdef USE_IMU_ICM42670
++    case ACC_ICM42670:
++        if (icm42670AccDetect(dev)) {
++            accHardware = ACC_ICM42670;
++            break;
++        }
++        if (accHardwareToUse != ACC_AUTODETECT) {
++            break;
++        }
++        FALLTHROUGH;
++#endif
+ #ifdef USE_IMU_FAKE
+     case ACC_FAKE:
+         if (fakeAccDetect(dev)) {
+@@ -306,7 +338,9 @@ bool accInit(uint32_t targetLooptime)
+     memset(&acc, 0, sizeof(acc));
+ 
+     // Set inertial sensor tag (for dual-gyro selection)
+-#ifdef USE_DUAL_GYRO
++#if defined(USE_MYBOX_VIB)
++    acc.dev.imuSensorToUse = myboxActiveImuIndex();
++#elif defined(USE_DUAL_GYRO)
+     acc.dev.imuSensorToUse = gyroConfig()->gyro_to_use;     // Use the same selection from gyroConfig()
+ #else
+     acc.dev.imuSensorToUse = 0;
+@@ -321,6 +355,9 @@ bool accInit(uint32_t targetLooptime)
+     acc.accTargetLooptime = targetLooptime;
+     acc.accClipCount = 0;
+     accInitFilters();
++#ifdef USE_MYBOX_VIB
++    accSetCalibrationValues();
++#endif
+     updateAccCoefficients();
+ 
+     for (int axis = 0; axis < XYZ_AXIS_COUNT; axis++) {
+@@ -518,6 +555,9 @@ static void performAcclerationCalibration(void)
+         else {
+             // saveConfigAndNotify will trigger eepromREAD and in turn call back the accelerometer gain validation
+             // that will set ENABLE_STATE(ACCELEROMETER_CALIBRATED) if all is good
++#ifdef USE_MYBOX_VIB
++            accelerometerConfigMutable()->calibrationImu = myboxActiveImuIndex() + 1;
++#endif
+             saveConfigAndNotify();
+             //Recompute all coeffs
+             updateAccCoefficients();
+@@ -664,6 +704,12 @@ bool accIsClipped(void)
+ 
+ void accSetCalibrationValues(void)
+ {
++#ifdef USE_MYBOX_VIB
++    if (!accCalibrationMatchesImu()) {
++        DISABLE_STATE(ACCELEROMETER_CALIBRATED);
++        return;
++    }
++#endif
+     if (!ARMING_FLAG(SIMULATOR_MODE_SITL) &&
+         ((accelerometerConfig()->accZero.raw[X] == 0) && (accelerometerConfig()->accZero.raw[Y] == 0) && (accelerometerConfig()->accZero.raw[Z] == 0) &&
+         (accelerometerConfig()->accGain.raw[X] == 4096) && (accelerometerConfig()->accGain.raw[Y] == 4096) &&(accelerometerConfig()->accGain.raw[Z] == 4096))) {
+diff --git a/src/main/sensors/acceleration.h b/src/main/sensors/acceleration.h
+index 5ed555c..fff1e7b 100644
+--- a/src/main/sensors/acceleration.h
++++ b/src/main/sensors/acceleration.h
+@@ -47,7 +47,8 @@ typedef enum {
+     ACC_ICM45686,
+     ACC_ICM40609D,
+     ACC_FAKE,
+-    ACC_MAX = ACC_FAKE
++    ACC_ICM42670,
++    ACC_MAX = ACC_ICM42670
+ } accelerationSensor_e;
+ 
+ typedef struct {
+@@ -73,7 +74,10 @@ typedef struct accelerometerConfig_s {
+     uint8_t acc_hardware;                   // Which acc hardware to use on boards with more than one device
+     uint16_t acc_lpf_hz;                    // cutoff frequency for the low pass filter used on the acc z-axis for althold in Hz
+     flightDynamicsTrims_t accZero;          // Accelerometer offset
+-    flightDynamicsTrims_t accGain;          // Accelerometer gain to read exactly 1G
++    flightDynamicsTrims_t accGain;
++#ifdef USE_MYBOX_VIB
++    uint8_t calibrationImu; // Sensor index plus one, or zero before calibration.
++#endif          // Accelerometer gain to read exactly 1G
+     uint8_t acc_notch_hz;                   // Accelerometer notch filter frequency
+     uint8_t acc_notch_cutoff;               // Accelerometer notch filter cutoff frequency
+     uint8_t acc_soft_lpf_type;              // Accelerometer LPF type
+diff --git a/src/main/sensors/barometer.c b/src/main/sensors/barometer.c
+index aaea9dd..ae6b7e8 100644
+--- a/src/main/sensors/barometer.c
++++ b/src/main/sensors/barometer.c
+@@ -50,6 +50,9 @@
+ 
+ #include "sensors/barometer.h"
+ #include "sensors/sensors.h"
++#ifdef USE_MYBOX_V2_SENSORS
++#include "mybox_sensors.h"
++#endif
+ 
+ #ifdef USE_HARDWARE_REVISION_DETECTION
+ #include "hardware_revision.h"
+@@ -253,12 +256,90 @@ bool baroDetect(baroDev_t *dev, baroSensor_e baroHardwareToUse)
+     return true;
+ }
+ 
++#ifdef USE_MYBOX_V2_SENSORS
++typedef struct {
++    bool tempStarted;
++    bool pressureStarted;
++    bool temperatureValid;
++    bool valid;
++    int32_t pressure;
++    int32_t temperature;
++} myboxPressureSample_t;
++
++static myboxPressureSample_t selectedBaroSample;
++#ifdef USE_MYBOX_VIB
++int8_t myboxActiveBarometerIndex(void)
++{
++    if (detectedSensors[SENSOR_INDEX_BARO] != BARO_SPL06) {
++        return -1;
++    }
++    return baro.dev.busDev->descriptorPtr->tag;
++}
++
++static myboxPressureSample_t secondaryBaroSample;
++static baroDev_t secondaryBaro;
++static bool secondaryBaroPresent;
++#endif
++
++static void myboxBaroStartPressure(baroDev_t *device, myboxPressureSample_t *sample)
++{
++    sample->temperatureValid = sample->tempStarted && device->get_ut(device);
++    sample->pressureStarted = device->start_up(device);
++}
++
++static void myboxBaroCollect(baroDev_t *device, myboxPressureSample_t *sample)
++{
++    const bool pressureValid = sample->pressureStarted && device->get_up(device);
++    sample->tempStarted = device->start_ut(device);
++    sample->valid = pressureValid && sample->temperatureValid
++        && device->calculate(device, &sample->pressure, &sample->temperature)
++        && sample->pressure >= 20000 && sample->pressure <= 120000;
++}
++
++bool myboxBarometerSample(uint8_t index, int32_t *pressurePa)
++{
++    if (detectedSensors[SENSOR_INDEX_BARO] == BARO_SPL06
++        && baro.dev.busDev->descriptorPtr->tag == index && selectedBaroSample.valid) {
++        *pressurePa = selectedBaroSample.pressure;
++        return true;
++    }
++#ifdef USE_MYBOX_VIB
++    if (secondaryBaroPresent && secondaryBaro.busDev->descriptorPtr->tag == index && secondaryBaroSample.valid) {
++        *pressurePa = secondaryBaroSample.pressure;
++        return true;
++    }
++#endif
++    return false;
++}
++#endif
++
+ bool baroInit(void)
+ {
+-    if (!baroDetect(&baro.dev, barometerConfig()->baro_hardware)) {
+-        return false;
++    const baroSensor_e requested = barometerConfig()->baro_hardware;
++    bool detected = baroDetect(&baro.dev, requested);
++#ifdef USE_MYBOX_VIB
++    if (requested == BARO_AUTODETECT || requested == BARO_SPL06) {
++        secondaryBaroPresent = spl06DetectTag(&secondaryBaro, 1);
++        if (secondaryBaroPresent && (!detected || myboxSensorConfig()->barometerIndex == 1)) {
++            const baroDev_t mainBaro = baro.dev;
++            baro.dev = secondaryBaro;
++            secondaryBaro = mainBaro;
++            secondaryBaroPresent = detected;
++            detected = true;
++            detectedSensors[SENSOR_INDEX_BARO] = BARO_SPL06;
++            sensorsSet(SENSOR_BARO);
++        }
++        if (secondaryBaroPresent) {
++            secondaryBaroSample.tempStarted = secondaryBaro.start_ut(&secondaryBaro);
++        }
+     }
+-    return true;
++#endif
++#ifdef USE_MYBOX_V2_SENSORS
++    if (detected && detectedSensors[SENSOR_INDEX_BARO] == BARO_SPL06) {
++        selectedBaroSample.tempStarted = baro.dev.start_ut(&baro.dev);
++    }
++#endif
++    return detected;
+ }
+ 
+ typedef enum {
+@@ -276,6 +357,33 @@ uint32_t baroUpdate(void)
+     }
+ #endif
+ 
++#ifdef USE_MYBOX_V2_SENSORS
++    if (detectedSensors[SENSOR_INDEX_BARO] == BARO_SPL06) {
++        if (state == BAROMETER_NEEDS_SAMPLES) {
++            myboxBaroStartPressure(&baro.dev, &selectedBaroSample);
++#ifdef USE_MYBOX_VIB
++            if (secondaryBaroPresent) {
++                myboxBaroStartPressure(&secondaryBaro, &secondaryBaroSample);
++            }
++#endif
++            state = BAROMETER_NEEDS_CALCULATION;
++            return baro.dev.up_delay;
++        }
++        myboxBaroCollect(&baro.dev, &selectedBaroSample);
++#ifdef USE_MYBOX_VIB
++        if (secondaryBaroPresent) {
++            myboxBaroCollect(&secondaryBaro, &secondaryBaroSample);
++        }
++#endif
++        if (selectedBaroSample.valid) {
++            baro.baroPressure = selectedBaroSample.pressure;
++            baro.baroTemperature = selectedBaroSample.temperature;
++        }
++        state = BAROMETER_NEEDS_SAMPLES;
++        return baro.dev.ut_delay;
++    }
++#endif
++
+     switch (state) {
+         default:
+         case BAROMETER_NEEDS_SAMPLES:
+@@ -359,6 +467,11 @@ int16_t baroGetTemperature(void)
+ 
+ bool baroIsHealthy(void)
+ {
++#ifdef USE_MYBOX_V2_SENSORS
++    if (detectedSensors[SENSOR_INDEX_BARO] == BARO_SPL06) {
++        return selectedBaroSample.valid;
++    }
++#endif
+     return sensors(SENSOR_BARO);
+ }
+ 
+diff --git a/src/main/sensors/compass.c b/src/main/sensors/compass.c
+index 79bcf16..47d4941 100644
+--- a/src/main/sensors/compass.c
++++ b/src/main/sensors/compass.c
+@@ -46,6 +46,7 @@
+ #include "drivers/compass/compass_vcm5883.h"
+ #include "drivers/compass/compass_mlx90393.h"
+ #include "drivers/compass/compass_msp.h"
++#include "drivers/compass/compass_dronecan.h"
+ #include "drivers/io.h"
+ #include "drivers/light_led.h"
+ #include "drivers/time.h"
+@@ -297,6 +298,19 @@ bool compassDetect(magDev_t *dev, magSensor_e magHardwareToUse)
+         }
+         FALLTHROUGH;
+ 
++    case MAG_DRONECAN:
++#ifdef USE_MAG_DRONECAN
++        // Explicit selection: a missing CAN sensor must not preempt I2C autodetection.
++        if (magHardwareToUse == MAG_DRONECAN && dronecanMagDetect(dev)) {
++            magHardware = MAG_DRONECAN;
++            break;
++        }
++#endif
++        if (magHardwareToUse != MAG_AUTODETECT) {
++            break;
++        }
++        FALLTHROUGH;
++
+     case MAG_FAKE:
+ #ifdef USE_FAKE_MAG
+         if (fakeMagDetect(dev)) {
+diff --git a/src/main/sensors/compass.h b/src/main/sensors/compass.h
+index b277f6b..ef84cb6 100644
+--- a/src/main/sensors/compass.h
++++ b/src/main/sensors/compass.h
+@@ -46,7 +46,8 @@ typedef enum {
+     MAG_MLX90393,
+     MAG_LIS2MDL,
+     MAG_FAKE,
+-    MAG_MAX = MAG_FAKE
++    MAG_DRONECAN,
++    MAG_MAX = MAG_DRONECAN
+ } magSensor_e;
+ 
+ typedef struct mag_s {
+diff --git a/src/main/sensors/gyro.c b/src/main/sensors/gyro.c
+index fe76173..b8d6bd8 100644
+--- a/src/main/sensors/gyro.c
++++ b/src/main/sensors/gyro.c
+@@ -47,6 +47,7 @@
+ #include "drivers/accgyro/accgyro_bmi270.h"
+ #include "drivers/accgyro/accgyro_icm20689.h"
+ #include "drivers/accgyro/accgyro_icm42605.h"
++#include "drivers/accgyro/accgyro_icm42670.h"
+ #include "drivers/accgyro/accgyro_icm45686.h"
+ #include "drivers/accgyro/accgyro_icm40609d.h"
+ #include "drivers/accgyro/accgyro_lsm6dxx.h"
+@@ -120,13 +121,17 @@ EXTENDED_FASTRAM secondaryDynamicGyroNotchState_t secondaryDynamicGyroNotchState
+ 
+ #endif
+ 
+-PG_REGISTER_WITH_RESET_TEMPLATE(gyroConfig_t, gyroConfig, PG_GYRO_CONFIG, 12);
++PG_REGISTER_WITH_RESET_TEMPLATE(gyroConfig_t, gyroConfig, PG_GYRO_CONFIG, 14);
+ 
+ PG_RESET_TEMPLATE(gyroConfig_t, gyroConfig,
+     .gyro_anti_aliasing_lpf_hz = SETTING_GYRO_ANTI_ALIASING_LPF_HZ_DEFAULT,
+     .looptime = SETTING_LOOPTIME_DEFAULT,
+ #ifdef USE_DUAL_GYRO
++    #ifdef USE_MYBOX_VIB
++    .gyro_to_use = 1,
++#else
+     .gyro_to_use = SETTING_GYRO_TO_USE_DEFAULT,
++#endif
+     .gyro_secondary_enabled = SETTING_GYRO_SECONDARY_ENABLED_DEFAULT,
+ #endif
+     .gyro_main_lpf_hz = SETTING_GYRO_MAIN_LPF_HZ_DEFAULT,
+@@ -268,6 +273,15 @@ STATIC_UNIT_TESTED gyroSensor_e gyroDetect(gyroDev_t *dev, gyroSensor_e gyroHard
+         FALLTHROUGH;
+ #endif
+ 
++#ifdef USE_IMU_ICM42670
++    case GYRO_ICM42670:
++        if (icm42670GyroDetect(dev)) {
++            gyroHardware = GYRO_ICM42670;
++            break;
++        }
++        FALLTHROUGH;
++#endif
++
+ #ifdef USE_IMU_FAKE
+     case GYRO_FAKE:
+         if (fakeGyroDetect(dev)) {
+@@ -349,13 +363,25 @@ bool gyroInit(void)
+ 
+     // Set inertial sensor tag (for dual-gyro selection)
+ #ifdef USE_DUAL_GYRO
++#ifdef USE_MYBOX_VIB
++    gyroDev[0].imuSensorToUse = gyroConfig()->gyro_to_use == 0 ? 0 : 1;
++#else
+     gyroDev[0].imuSensorToUse = gyroConfig()->gyro_to_use;
++#endif
+ #else
+     gyroDev[0].imuSensorToUse = 0;
+ #endif
+ 
+     // Detecting gyro0
+     gyroSensor_e gyroHardware = gyroDetect(&gyroDev[0], GYRO_AUTODETECT);
++#ifdef USE_MYBOX_VIB
++    if (gyroHardware == GYRO_NONE) {
++        const uint8_t fallback = gyroDev[0].imuSensorToUse == 1 ? 0 : 1;
++        memset(&gyroDev[0], 0, sizeof(gyroDev[0]));
++        gyroDev[0].imuSensorToUse = fallback;
++        gyroHardware = gyroDetect(&gyroDev[0], GYRO_AUTODETECT);
++    }
++#endif
+     if (gyroHardware == GYRO_NONE) {
+         gyro.initialized = false;
+         detectedSensors[SENSOR_INDEX_GYRO] = GYRO_NONE;
+@@ -380,7 +406,7 @@ bool gyroInit(void)
+     if (gyroConfig()->gyro_secondary_enabled) {
+         // Targets disagree on how they tag the second IMU, so probe rather than assume tag 1
+         for (uint8_t tag = 0; tag <= MAX_GYRO_SENSOR_TAG; tag++) {
+-            if (tag == gyroConfig()->gyro_to_use) {
++            if (tag == gyroDev[GYRO_PRIMARY].imuSensorToUse) {
+                 continue;
+             }
+ 
+@@ -418,6 +444,13 @@ static float gyroMovementThreshold(uint8_t index)
+     return CALIBRATING_GYRO_MORON_THRESHOLD_DPS / gyroDev[index].scale;
+ }
+ 
++#ifdef USE_MYBOX_VIB
++uint8_t myboxActiveImuIndex(void)
++{
++    return gyroDev[0].imuSensorToUse;
++}
++#endif
++
+ void gyroStartCalibration(void)
+ {
+     if (!gyro.initialized) {
+diff --git a/src/main/sensors/gyro.h b/src/main/sensors/gyro.h
+index 72091d4..a4046ef 100644
+--- a/src/main/sensors/gyro.h
++++ b/src/main/sensors/gyro.h
+@@ -45,7 +45,8 @@ typedef enum {
+     GYRO_LSM6DXX,
+     GYRO_ICM45686,
+     GYRO_ICM40609D,
+-    GYRO_FAKE
++    GYRO_FAKE,
++    GYRO_ICM42670
+ } gyroSensor_e;
+ 
+ typedef enum {
+@@ -127,6 +128,9 @@ void gyroSetSecondaryLogging(bool logging);
+ #endif
+ 
+ bool gyroInit(void);
++#ifdef USE_MYBOX_VIB
++uint8_t myboxActiveImuIndex(void);
++#endif
+ void gyroGetMeasuredRotationRate(fpVector3_t *imuMeasuredRotationBF);
+ void gyroUpdate(void);
+ void gyroFilter(void);

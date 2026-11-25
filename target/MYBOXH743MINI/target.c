@@ -9,6 +9,8 @@
 #include "drivers/sensor.h"
 #include "drivers/timer.h"
 #include "flight/mixer.h"
+#include "io/gps.h"
+#include "sensors/compass.h"
 
 #ifdef USE_MYBOX_VIB
 BUSDEV_REGISTER_SPI_TAG(myboxModuleImu, DEVHW_ICM42670, BUS_SPI1, PA4, NONE, 1, DEVFLAGS_NONE, MYBOX_MODULE_IMU_ALIGN);
@@ -25,6 +27,8 @@ BUSDEV_REGISTER_I2C_TAG(myboxPitotI2c1, DEVHW_MS4525, BUS_I2C1, 0x28, NONE,
 void targetConfiguration(void)
 {
     motorConfigMutable()->motorPwmProtocol = PWM_TYPE_STANDARD;
+    gpsConfigMutable()->provider = GPS_DRONECAN;
+    compassConfigMutable()->mag_hardware = MAG_DRONECAN;
 }
 
 // The entries follow the numbering of the PWM connector.

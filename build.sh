@@ -8,8 +8,8 @@ fi
 
 overlay_dir=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 checkout=$1
-tag=9.1.0
-revision=e519b69b02e27c8bdc03b4a0889f1baaae211a54
+tag=10.0.0-rc2
+revision=f1cd5c6f68838227ee4d23e97a44c017849cbb14
 
 export PATH="$checkout/tools/mybox-ruby/bin:$PATH"
 for tool in git cmake make ruby; do
@@ -39,7 +39,7 @@ else
     cp -R -- "$overlay_dir/target/MYBOXH743MINI" "$target_dir"
 fi
 
-for patch in "$overlay_dir/spa06-003.patch" "$overlay_dir/i2c4-pb9.patch" "$overlay_dir/vib-sensors.patch" "$overlay_dir/dshot-motor-init.patch" "$overlay_dir/sd-card-init.patch"; do
+for patch in "$overlay_dir/board-support.patch"; do
     if ! git -C "$checkout" apply --reverse --check "$patch" 2>/dev/null; then
         git -C "$checkout" apply "$patch"
     fi

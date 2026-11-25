@@ -17,6 +17,12 @@
 #define USE_TARGET_CONFIG
 #define USE_DSHOT
 #define USE_ESC_SENSOR
+#define USE_DRONECAN
+#define USE_MYBOX_CAN_SELECT
+#define USE_MAG_DRONECAN
+#define CAN1_RX PD0
+#define CAN1_TX PD1
+#define USE_SDIO_PULLUP
 #define USE_MYBOX_RCIN
 #define LED0                    PE4
 #define LED0_INVERTED
@@ -82,7 +88,7 @@
 #define SDCARD_SDIO_NORMAL_SPEED
 #define USE_MYBOX_SDMMC_RECOVERY
 #define ENABLE_BLACKBOX_LOGGING_ON_SDCARD_BY_DEFAULT
-#define DEFAULT_FEATURES (FEATURE_OSD | FEATURE_VBAT | FEATURE_CURRENT_METER | FEATURE_BLACKBOX)
+#define DEFAULT_FEATURES (FEATURE_GPS | FEATURE_OSD | FEATURE_VBAT | FEATURE_CURRENT_METER | FEATURE_BLACKBOX)
 
 #define TARGET_IO_PORTA         0xffff
 #define TARGET_IO_PORTB         0xffff
@@ -99,6 +105,9 @@
 #define USE_IMU_ICM42605         // INAV detects ICM-42688-P with this driver.
 #define ICM42605_SPI_BUS        BUS_SPI1
 #define ICM42605_CS_PIN         PC15
+#define CAN1_STANDBY PB3
+#define CAN2_RX PD9
+#define CAN2_TX PD10
 #define IMU_ICM42605_ALIGN      CW180_DEG_FLIP // Roll 180 degrees: X, -Y, -Z.
 #define SPI2_MISO_PIN           PB14
 #define SPI2_MOSI_PIN           PB15
@@ -109,7 +118,6 @@
 #define USE_UART4
 #define UART4_TX_PIN            PB9
 #define UART4_RX_PIN            PB8
-#define GPS_UART                SERIAL_PORT_USART4
 #define MS4525_PROBE_COUNT     2
 #define MAX_PWM_OUTPUT_PORTS    14
 #define VBAT_SCALE_DEFAULT      2000
@@ -133,6 +141,10 @@
 #define ICM45686_SPI_BUS        BUS_SPI2
 #define ICM45686_CS_PIN         PB12
 #define IMU_ICM45686_ALIGN      CW0_DEG
+#define CAN1_STANDBY PA8
+#define CAN2_RX PB5
+#define CAN2_TX PB6
+#define CAN2_STANDBY PD7
 
 #undef MAX7456_SPI_BUS
 #undef MAX7456_CS_PIN
@@ -153,7 +165,6 @@
 #define USE_UART3
 #define UART3_TX_PIN            PD8
 #define UART3_RX_PIN            PD9
-#define GPS_UART                SERIAL_PORT_USART1
 #define BEEPER                  PB4
 #define BEEPER_PWM_FREQUENCY    2500
 #define MS4525_PROBE_COUNT     3
