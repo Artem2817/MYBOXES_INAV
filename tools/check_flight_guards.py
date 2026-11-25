@@ -62,7 +62,7 @@ int main(void){SPI_TypeDef bus={0};uint8_t bytes[6];
 '''
     compile_run(work,"spi",spi)
     # Reuse real HAL/startup harness, then add runtime CMD13/reset integration.
-    sd=(root/"mybox/tools/check_sdmmc_startup.c").read_text().replace("int main(void)","int baseline_main(void)")
+    sd=Path(__file__).with_name("check_sdmmc_startup.c").read_text().replace("int main(void)","int baseline_main(void)")
     hal=(root/"src/main/drivers/sdcard/sdmmc_sdio_hal.c").read_text()
     header=(root/"src/main/drivers/sdcard/sdmmc_sdio.h").read_text()
     types=header[header.rindex("typedef struct {",0,header.index("const char *phase;")):header.index("sdmmcDiagnostics_t SD_GetDiagnostics(void);")]
