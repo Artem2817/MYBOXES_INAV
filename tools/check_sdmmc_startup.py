@@ -11,6 +11,8 @@ types = header[header.rindex("typedef struct {", 0, header.index("const char *ph
                header.index("sdmmcDiagnostics_t SD_GetDiagnostics(void);")]
 diagnostics = source[source.index("static sdmmcDiagnostics_t sdDiagnostics"):]
 diagnostics = diagnostics[:diagnostics.index("#endif")]
+# Startup-only harness does not include the asynchronous runtime CMD13 poller.
+diagnostics = diagnostics.replace("static timeUs_t sdStatusStartedAt;", "")
 transfer = source[source.index("#define SDMMC_TRANSFER_ERRORS"):source.index("void sdioPinConfigure(void)")]
 transfer = transfer[:transfer.rindex("#endif")]
 startup = source[source.index("static bool sdInitCard("):source.index("SD_Error_t SD_GetCardInfo(void)")]

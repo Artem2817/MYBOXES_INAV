@@ -45,8 +45,8 @@ for patch in "$overlay_dir/board-support.patch"; do
     fi
 done
 
-build_dir="$checkout/build-mybox"
-cmake -S "$checkout" -B "$build_dir" -G 'Unix Makefiles' -DCMAKE_BUILD_TYPE=Release
+build_dir="${BUILD_DIR:-$checkout/build-mybox}"
+cmake -S "$checkout" -B "$build_dir" -G 'Unix Makefiles' -DCMAKE_BUILD_TYPE=Release -DWARNINGS_AS_ERRORS=ON
 cmake --build "$build_dir" --parallel "${JOBS:-4}" \
     --target MYBOXH743MINI MYBOXH743MINIV2 MYBOXH743MINIV2VIB_BENCH
 

@@ -1,3 +1,21 @@
+diff --git a/lib/main/STM32H7/Drivers/STM32H7xx_HAL_Driver/Src/stm32h7xx_hal_i2c.c b/lib/main/STM32H7/Drivers/STM32H7xx_HAL_Driver/Src/stm32h7xx_hal_i2c.c
+index 56cae08..ff40ff1 100644
+--- a/lib/main/STM32H7/Drivers/STM32H7xx_HAL_Driver/Src/stm32h7xx_hal_i2c.c
++++ b/lib/main/STM32H7/Drivers/STM32H7xx_HAL_Driver/Src/stm32h7xx_hal_i2c.c
+@@ -341,7 +341,12 @@
+   */
+ #define TIMING_CLEAR_MASK   (0xF0FFFFFFU)  /*!< I2C TIMING clear register Mask */
+ #define I2C_TIMEOUT_ADDR    (10000U)       /*!< 10 s  */
+-#define I2C_TIMEOUT_BUSY    (25U)          /*!< 25 ms */
++#if defined(MYBOXH743MINI) || defined(MYBOXH743MINIV2) || defined(MYBOXH743MINIV2VIB_BENCH)
++#define I2C_TIMEOUT_BUSY    (1U)
++#else
++#define I2C_TIMEOUT_BUSY    (25U)
++#endif
++/* original BUSY default: */          /*!< 25 ms */
+ #define I2C_TIMEOUT_DIR     (25U)          /*!< 25 ms */
+ #define I2C_TIMEOUT_RXNE    (25U)          /*!< 25 ms */
+ #define I2C_TIMEOUT_STOPF   (25U)          /*!< 25 ms */
 diff --git a/lib/main/STM32H7/Drivers/STM32H7xx_HAL_Driver/Src/stm32h7xx_hal_sd.c b/lib/main/STM32H7/Drivers/STM32H7xx_HAL_Driver/Src/stm32h7xx_hal_sd.c
 index 1a5ba8d..efdb7f0 100644
 --- a/lib/main/STM32H7/Drivers/STM32H7xx_HAL_Driver/Src/stm32h7xx_hal_sd.c
@@ -81,6 +99,23 @@ index 1a5ba8d..efdb7f0 100644
    /* Set default card type */
    hsd->SdCard.CardType = CARD_SDSC;
  
+diff --git a/lib/main/STM32H7/Drivers/STM32H7xx_HAL_Driver/Src/stm32h7xx_ll_sdmmc.c b/lib/main/STM32H7/Drivers/STM32H7xx_HAL_Driver/Src/stm32h7xx_ll_sdmmc.c
+index dd39836..0b0e8c1 100644
+--- a/lib/main/STM32H7/Drivers/STM32H7xx_HAL_Driver/Src/stm32h7xx_ll_sdmmc.c
++++ b/lib/main/STM32H7/Drivers/STM32H7xx_HAL_Driver/Src/stm32h7xx_ll_sdmmc.c
+@@ -152,6 +152,12 @@
+ 
+ /* Includes ------------------------------------------------------------------*/
+ #include "stm32h7xx_hal.h"
++#if defined(MYBOXH743MINI) || defined(MYBOXH743MINIV2) || defined(MYBOXH743MINIV2VIB_BENCH)
++// Boot cards and runtime single-block commands get a bounded command-response budget.
++#undef SDMMC_CMDTIMEOUT
++#define SDMMC_CMDTIMEOUT 2U
++#endif
++
+ 
+ /** @addtogroup STM32H7xx_HAL_Driver
+   * @{
 diff --git a/src/main/CMakeLists.txt b/src/main/CMakeLists.txt
 index 1cfd028..ffb389f 100755
 --- a/src/main/CMakeLists.txt
@@ -556,10 +591,83 @@ index 75da648..d37810c 100644
      DEVHW_INA226,       // I2C current and voltage monitor
  } devHardwareType_e;
 diff --git a/src/main/drivers/bus_i2c_hal.c b/src/main/drivers/bus_i2c_hal.c
-index 3b1459a..91749ca 100644
+index 3b1459a..bc12918 100644
 --- a/src/main/drivers/bus_i2c_hal.c
 +++ b/src/main/drivers/bus_i2c_hal.c
-@@ -329,8 +329,15 @@ void i2cInit(I2CDevice device)
+@@ -22,6 +22,9 @@
+ 
+ #include "drivers/io.h"
+ #include "drivers/time.h"
++#ifdef USE_MYBOX_IO_TIMEOUTS
++#include "fc/runtime_config.h"
++#endif
+ 
+ #include "drivers/bus_i2c.h"
+ #include "drivers/nvic.h"
+@@ -96,10 +99,18 @@ static volatile uint16_t i2cErrorCount = 0;
+ // functions expect the timeout to be in ticks.
+ // Since we're setting up the ticks a 1khz, each
+ // tick equals 1ms.
+-#define I2C_DEFAULT_TIMEOUT     (I2C_TIMEOUT / 1000)
++#ifdef USE_MYBOX_IO_TIMEOUTS
++#define I2C_DEFAULT_TIMEOUT (ARMING_FLAG(ARMED) ? 1U : (I2C_TIMEOUT / 1000))
++#else
++#define I2C_DEFAULT_TIMEOUT (I2C_TIMEOUT / 1000)
++#endif
+ 
+ typedef struct {
+     bool initialised;
++#ifdef USE_MYBOX_IO_TIMEOUTS
++    bool retryPending;
++    uint32_t lastFailureMs;
++#endif
+     I2C_HandleTypeDef handle;
+ } i2cState_t;
+ 
+@@ -158,6 +169,10 @@ void I2C4_EV_IRQHandler(void)
+ static bool i2cHandleHardwareFailure(I2CDevice device)
+ {
+     i2cErrorCount++;
++#ifdef USE_MYBOX_IO_TIMEOUTS
++    i2cState[device].retryPending = true;
++    i2cState[device].lastFailureMs = millis();
++#endif
+     i2cInit(device);
+     return false;
+ }
+@@ -171,7 +186,14 @@ bool i2cWriteBuffer(I2CDevice device, uint8_t addr_, uint8_t reg_, uint8_t len_,
+ 
+     if (!state->initialised)
+         return false;
+-
++#ifdef USE_MYBOX_IO_TIMEOUTS
++    if (state->retryPending) {
++        if ((uint32_t)(millis() - state->lastFailureMs) < 100U) {
++            return false;
++        }
++        state->retryPending = false;
++    }
++#endif
+     HAL_StatusTypeDef status;
+ 
+     if ((reg_ == 0xFF || len_ == 0) && allowRawAccess) {
+@@ -201,7 +223,14 @@ bool i2cRead(I2CDevice device, uint8_t addr_, uint8_t reg_, uint8_t len, uint8_t
+ 
+     if (!state->initialised)
+         return false;
+-
++#ifdef USE_MYBOX_IO_TIMEOUTS
++    if (state->retryPending) {
++        if ((uint32_t)(millis() - state->lastFailureMs) < 100U) {
++            return false;
++        }
++        state->retryPending = false;
++    }
++#endif
+     HAL_StatusTypeDef status;
+ 
+     if (reg_ == 0xFF && allowRawAccess) {
+@@ -329,8 +358,15 @@ void i2cInit(I2CDevice device)
      i2cUnstick(scl, sda);
  
      // Init pins
@@ -576,6 +684,81 @@ index 3b1459a..91749ca 100644
  
      // Init I2C peripheral
      pHandle->Instance = hardware->dev;
+@@ -435,6 +471,9 @@ static void i2cUnstick(IO_t scl, IO_t sda)
+     for (i = 0; i < 9; i++) {
+         // Wait for any clock stretching to finish
+         int timeout = 100;
++#ifdef USE_MYBOX_IO_TIMEOUTS
++        if (ARMING_FLAG(ARMED)) timeout = 1;
++#endif
+         while (!IORead(scl) && timeout) {
+             delayMicroseconds(5);
+             timeout--;
+diff --git a/src/main/drivers/bus_spi_hal_ll.c b/src/main/drivers/bus_spi_hal_ll.c
+index 8cf5d47..6a1a060 100644
+--- a/src/main/drivers/bus_spi_hal_ll.c
++++ b/src/main/drivers/bus_spi_hal_ll.c
+@@ -378,6 +378,9 @@ bool spiIsBusBusy(SPI_TypeDef *instance)
+ 
+ bool spiTransfer(SPI_TypeDef *instance, uint8_t *rxData, const uint8_t *txData, int len)
+ {
++    if (len <= 0) {
++        return len == 0;
++    }
+ #if defined(STM32H7)
+     LL_SPI_SetTransferSize(instance, len);
+     LL_SPI_Enable(instance);
+@@ -386,8 +389,7 @@ bool spiTransfer(SPI_TypeDef *instance, uint8_t *rxData, const uint8_t *txData,
+         int spiTimeout = 1000;
+         while(!LL_SPI_IsActiveFlag_TXP(instance)) {
+             if ((spiTimeout--) == 0) {
+-                spiTimeoutUserCallback(instance);
+-                return false;
++                goto transferFailed;
+             }
+         }
+         uint8_t b = txData ? *(txData++) : 0xFF;
+@@ -396,8 +398,7 @@ bool spiTransfer(SPI_TypeDef *instance, uint8_t *rxData, const uint8_t *txData,
+         spiTimeout = 1000;
+         while (!LL_SPI_IsActiveFlag_RXP(instance)) {
+             if ((spiTimeout--) == 0) {
+-                spiTimeoutUserCallback(instance);
+-                return false;
++                goto transferFailed;
+             }
+         }
+         b = LL_SPI_ReceiveData8(instance);
+@@ -406,7 +407,12 @@ bool spiTransfer(SPI_TypeDef *instance, uint8_t *rxData, const uint8_t *txData,
+         }
+         --len;
+     }
+-    while (!LL_SPI_IsActiveFlag_EOT(instance));
++    int eotTimeout = 1000;
++    while (!LL_SPI_IsActiveFlag_EOT(instance)) {
++        if (eotTimeout-- == 0) {
++            goto transferFailed;
++        }
++    }
+     LL_SPI_ClearFlag_TXTF(instance);
+     LL_SPI_Disable(instance);
+ #else
+@@ -439,6 +445,16 @@ bool spiTransfer(SPI_TypeDef *instance, uint8_t *rxData, const uint8_t *txData,
+ #endif
+ 
+     return true;
++#if defined(STM32H7)
++transferFailed:
++    // SPE=0 aborts the current transaction; clear sticky flags before the next CS.
++    LL_SPI_Disable(instance);
++    LL_SPI_ClearFlag_EOT(instance);
++    LL_SPI_ClearFlag_TXTF(instance);
++    LL_SPI_ClearFlag_OVR(instance);
++    spiTimeoutUserCallback(instance);
++    return false;
++#endif
+ }
+ 
+ void spiSetSpeed(SPI_TypeDef *instance, SPIClockSpeed_e speed)
 diff --git a/src/main/drivers/compass/compass_dronecan.c b/src/main/drivers/compass/compass_dronecan.c
 new file mode 100644
 index 0000000..52cca81
@@ -664,7 +847,7 @@ index 0000000..fd0f27a
 +bool dronecanMagDetect(struct magDev_s *mag);
 +void dronecanMagReceive(uint8_t nodeId, uint8_t sensorId, const float fieldGauss[3]);
 diff --git a/src/main/drivers/dronecan/dronecan.c b/src/main/drivers/dronecan/dronecan.c
-index 0778c15..9cb47b1 100644
+index 0778c15..6d7068a 100644
 --- a/src/main/drivers/dronecan/dronecan.c
 +++ b/src/main/drivers/dronecan/dronecan.c
 @@ -36,6 +36,10 @@
@@ -678,7 +861,32 @@ index 0778c15..9cb47b1 100644
  
  /* Private variables ---------------------------------------------------------*/
  
-@@ -409,6 +413,17 @@ static bool shouldAcceptTransfer(const CanardInstance *ins,
+@@ -218,12 +222,23 @@ void dronecanUpdate(timeUs_t currentTimeUs)
+                     // ~1 second of 20ms recovery attempts with no success — permanent fault
+                     busoff_retries = 0;
+                     dronecanState = STATE_DRONECAN_FAILED;
+-                    LOG_ERROR(CAN, "DroneCAN: bus-off recovery failed after 50 attempts, entering FAILED state");
++                    busoffTimeUs = currentTimeUs;
++                    LOG_ERROR(CAN, "DroneCAN: bus-off persists, retrying after one second");
+                 }
+             }
+             break;
+ 
+         case STATE_DRONECAN_FAILED:
++            // Initialization failures have no valid canard instance. Bus-off failures do.
++            if (busOffCount && currentTimeUs - busoffTimeUs >= 1000000U) {
++                canardSTM32RecoverFromBusOff();
++                canardSTM32GetProtocolStatus(&protocolStatus);
++                busoffTimeUs = currentTimeUs;
++                if (!protocolStatus.BusOff) {
++                    dronecanState = STATE_DRONECAN_NORMAL;
++                    next_1hz_service_at = currentTimeUs + 1000000U;
++                }
++            }
+             break;
+ 
+         default:
+@@ -409,6 +424,17 @@ static bool shouldAcceptTransfer(const CanardInstance *ins,
          case UAVCAN_PROTOCOL_DYNAMIC_NODE_ID_ALLOCATION_ID:
              *out_data_type_signature = UAVCAN_PROTOCOL_DYNAMIC_NODE_ID_ALLOCATION_SIGNATURE;
              return true;
@@ -696,7 +904,7 @@ index 0778c15..9cb47b1 100644
          case UAVCAN_EQUIPMENT_GNSS_AUXILIARY_ID:
              *out_data_type_signature = UAVCAN_EQUIPMENT_GNSS_AUXILIARY_SIGNATURE;
              return true;
-@@ -431,6 +446,31 @@ static bool shouldAcceptTransfer(const CanardInstance *ins,
+@@ -431,6 +457,31 @@ static bool shouldAcceptTransfer(const CanardInstance *ins,
  
  // Canard Handlers ( Many have code copied from libcanard esc_node example: https://github.com/dronecan/libcanard/blob/master/examples/ESCNode/esc_node.c )
  
@@ -728,7 +936,7 @@ index 0778c15..9cb47b1 100644
  static void handle_GNSSAuxiliary(CanardInstance *ins, CanardRxTransfer *transfer) {
  	UNUSED(ins);
      if (gpsConfig()->provider != GPS_DRONECAN) return;
-@@ -576,6 +616,13 @@ static void onTransferReceived(CanardInstance *ins, CanardRxTransfer *transfer)
+@@ -576,6 +627,13 @@ static void onTransferReceived(CanardInstance *ins, CanardRxTransfer *transfer)
                  }
                  break;
  
@@ -858,6 +1066,130 @@ index 0000000..e1fe162
 +#include "config/parameter_group.h"
 +typedef struct { uint8_t bus; } myboxCanConfig_t;
 +PG_DECLARE(myboxCanConfig_t, myboxCanConfig);
+diff --git a/src/main/drivers/max7456.c b/src/main/drivers/max7456.c
+index ac764a5..8792b6e 100644
+--- a/src/main/drivers/max7456.c
++++ b/src/main/drivers/max7456.c
+@@ -22,6 +22,7 @@
+ #include <string.h>
+ 
+ #include "platform.h"
++#include "fc/runtime_config.h"
+ 
+ #ifdef USE_MAX7456
+ 
+@@ -227,11 +228,16 @@ static bool max7456IsBusy(void)
+ }
+ 
+ // Wait until max7456IsBusy() returns false, toggling a LED on each iteration
+-static void max7456WaitUntilNoBusy(void)
++static bool max7456WaitUntilNoBusy(void)
+ {
+-    while (1) {
++    const timeMs_t started = millis();
++    unsigned attempts = 0;
++    while (attempts++ < 10000U) {
+         if (!max7456IsBusy()) {
+-            break;
++            return true;
++        }
++        if ((timeMs_t)(millis() - started) >= 30U) {
++            return false;
+         }
+ #ifdef LED0_TOGGLE
+         LED0_TOGGLE;
+@@ -239,6 +245,7 @@ static void max7456WaitUntilNoBusy(void)
+         LED1_TOGGLE;
+ #endif
+     }
++    return false;
+ }
+ 
+ // Sets whether the OSD drawing is enabled. Returns true iff
+@@ -261,13 +268,6 @@ static bool max7456OSDIsEnabled(void)
+     return state.registers.vm0 & OSD_ENABLE;
+ }
+ 
+-static void max7456Lock(void)
+-{
+-    while(state.mutex);
+-
+-    state.mutex = true;
+-}
+-
+ static void max7456Unlock(void)
+ {
+     state.mutex = false;
+@@ -685,12 +685,20 @@ void max7456RefreshAll(void)
+ 
+ void max7456ReadNvm(uint16_t char_address, osdCharacter_t *chr)
+ {
++    if (ARMING_FLAG(ARMED)) {
++        memset(chr, 0, sizeof(*chr));
++        return;
++    }
++
+     // Check if device is available
+     if (state.dev == NULL) {
+         return;
+     }
+ 
+-    max7456Lock();
++    memset(chr, 0, sizeof(*chr));
++    if (!max7456TryLock()) {
++        return;
++    }
+     // OSD must be disabled to read or write to NVM
+     bool enabled = max7456OSDSetEnabled(false);
+ 
+@@ -704,7 +712,11 @@ void max7456ReadNvm(uint16_t char_address, osdCharacter_t *chr)
+     }
+     busWrite(state.dev, MAX7456ADD_CMM, READ_NVR);
+ 
+-    max7456WaitUntilNoBusy();
++    if (!max7456WaitUntilNoBusy()) {
++        state.isInitialized = false;
++        max7456Unlock();
++        return;
++    }
+ 
+     for (unsigned ii = 0; ii < OSD_CHAR_VISIBLE_BYTES; ii++) {
+         busWrite(state.dev, MAX7456ADD_CMAL, ii);
+@@ -717,6 +729,10 @@ void max7456ReadNvm(uint16_t char_address, osdCharacter_t *chr)
+ 
+ void max7456WriteNvm(uint16_t char_address, const osdCharacter_t *chr)
+ {
++    if (ARMING_FLAG(ARMED)) {
++        return;
++    }
++
+     uint8_t spiBuff[(sizeof(chr->data) * 2 + 2) * 2];
+     int bufPtr = 0;
+ 
+@@ -725,7 +741,9 @@ void max7456WriteNvm(uint16_t char_address, const osdCharacter_t *chr)
+         return;
+     }
+ 
+-    max7456Lock();
++    if (!max7456TryLock()) {
++        return;
++    }
+     // OSD must be disabled to read or write to NVM
+     max7456OSDSetEnabled(false);
+ 
+@@ -757,7 +775,11 @@ void max7456WriteNvm(uint16_t char_address, const osdCharacter_t *chr)
+ 
+     busTransfer(state.dev, NULL, spiBuff, bufPtr);
+ 
+-    max7456WaitUntilNoBusy();
++    if (!max7456WaitUntilNoBusy()) {
++        state.isInitialized = false;
++        max7456Unlock();
++        return;
++    }
+ 
+     /* XXX: Don't call max7456OSDEnable(), it's intentionally ommited.
+      * If we continue drawing while characters are being uploaded, we
 diff --git a/src/main/drivers/pitotmeter/pitotmeter_ms4525.c b/src/main/drivers/pitotmeter/pitotmeter_ms4525.c
 index c5272cc..5749db6 100644
 --- a/src/main/drivers/pitotmeter/pitotmeter_ms4525.c
@@ -927,30 +1259,43 @@ index 20aed6c..1723eb9 100644
  
  // Helper function for ESC passthrough
 diff --git a/src/main/drivers/sdcard/sdcard_sdio.c b/src/main/drivers/sdcard/sdcard_sdio.c
-index f763775..25e1749 100644
+index f763775..8810685 100644
 --- a/src/main/drivers/sdcard/sdcard_sdio.c
 +++ b/src/main/drivers/sdcard/sdcard_sdio.c
-@@ -134,10 +134,18 @@ static sdcardReceiveBlockStatus_e sdcard_receiveDataBlock(uint8_t *buffer, int c
+@@ -95,6 +95,14 @@ static bool sdcardSdio_isFunctional(void)
+  */
+ static void sdcardSdio_reset(void)
+ {
++#ifdef USE_MYBOX_SDMMC_RECOVERY
++    // Once boot has completed, a failed logger must not stall flight control.
++    // Stop IDMA before any caller releases/reuses its pending buffer.
++    SD_Disable();
++    sdcard.state = SDCARD_STATE_NOT_PRESENT;
++    ++sdcard.failureCount;
++    return;
++#endif
+     if (!sdcard_isInserted()) {
+         sdcard.state = SDCARD_STATE_NOT_PRESENT;
+         return;
+@@ -134,8 +142,16 @@ static sdcardReceiveBlockStatus_e sdcard_receiveDataBlock(uint8_t *buffer, int c
          return SDCARD_RECEIVE_BLOCK_IN_PROGRESS;
      }
  
 -    if (SD_GetState() != true) {
 +    if (ret != SD_OK) {
-         return SDCARD_RECEIVE_ERROR;
-     }
- 
++        return SDCARD_RECEIVE_ERROR;
++    }
++
 +    if (!SD_GetState()) {
 +#ifdef USE_MYBOX_SDMMC_RECOVERY
 +        return SDCARD_RECEIVE_BLOCK_IN_PROGRESS;
 +#else
-+        return SDCARD_RECEIVE_ERROR;
+         return SDCARD_RECEIVE_ERROR;
 +#endif
-+    }
-+
-     return SDCARD_RECEIVE_SUCCESS;
- }
+     }
  
-@@ -291,9 +299,9 @@ static bool sdcardSdio_poll(void)
+     return SDCARD_RECEIVE_SUCCESS;
+@@ -291,9 +307,9 @@ static bool sdcardSdio_poll(void)
                  goto doMore;
              } // else keep waiting for the CID to arrive
          break;
@@ -963,7 +1308,7 @@ index f763775..25e1749 100644
  
                  // The SD card is now busy committing that write to the card
                  sdcard.state = SDCARD_STATE_WAITING_FOR_WRITE;
-@@ -303,8 +311,20 @@ static bool sdcardSdio_poll(void)
+@@ -303,8 +319,20 @@ static bool sdcardSdio_poll(void)
                  if (sdcard.pendingOperation.callback) {
                      sdcard.pendingOperation.callback(SDCARD_BLOCK_OPERATION_WRITE, sdcard.pendingOperation.blockIndex, sdcard.pendingOperation.buffer, sdcard.pendingOperation.callbackData);
                  }
@@ -972,11 +1317,11 @@ index f763775..25e1749 100644
 +                if (status == SD_BUSY) {
 +                    SD_RecordFailure("write DMA timeout", true);
 +                }
++                sdcardSdio_reset();
 +                if (sdcard.pendingOperation.callback) {
 +                    sdcard.pendingOperation.callback(SDCARD_BLOCK_OPERATION_WRITE, sdcard.pendingOperation.blockIndex,
 +                        NULL, sdcard.pendingOperation.callbackData);
 +                }
-+                sdcardSdio_reset();
 +#endif
              }
 -        break;
@@ -985,7 +1330,7 @@ index f763775..25e1749 100644
          case SDCARD_STATE_WAITING_FOR_WRITE:
              if (SD_GetState()) {
                  sdcard.failureCount = 0; // Assume the card is good if it can complete a write
-@@ -329,6 +349,9 @@ static bool sdcardSdio_poll(void)
+@@ -329,6 +357,9 @@ static bool sdcardSdio_poll(void)
                   * their buffer and have no hope of retrying the operation. But this should be very rare and it allows
                   * them to reuse their buffer milliseconds faster than they otherwise would.
                   */
@@ -995,7 +1340,7 @@ index f763775..25e1749 100644
                  sdcardSdio_reset();
                  goto doMore;
              }
-@@ -353,6 +376,9 @@ static bool sdcardSdio_poll(void)
+@@ -353,6 +384,9 @@ static bool sdcardSdio_poll(void)
                      if (millis() <= sdcard.operationStartTime + SDCARD_TIMEOUT_READ_MSEC) {
                          break; // Timeout not reached yet so keep waiting
                      }
@@ -1005,7 +1350,7 @@ index f763775..25e1749 100644
                      // Timeout has expired, so fall through to convert to a fatal error
                      FALLTHROUGH;
  
-@@ -388,6 +414,9 @@ static bool sdcardSdio_poll(void)
+@@ -388,6 +422,9 @@ static bool sdcardSdio_poll(void)
      // Is the card's initialization taking too long?
      if (sdcard.state >= SDCARD_STATE_RESET && sdcard.state < SDCARD_STATE_READY
              && millis() - sdcard.operationStartTime > SDCARD_TIMEOUT_INIT_MILLIS) {
@@ -1015,7 +1360,7 @@ index f763775..25e1749 100644
          sdcardSdio_reset();
      }
  
-@@ -482,6 +511,9 @@ static sdcardOperationStatus_e sdcardSdio_writeBlock(uint32_t blockIndex, uint8_
+@@ -482,6 +519,9 @@ static sdcardOperationStatus_e sdcardSdio_writeBlock(uint32_t blockIndex, uint8_
  
      // DMA started successfully - only set state after confirming operation will proceed
      sdcard.state = SDCARD_STATE_SENDING_WRITE;
@@ -1025,7 +1370,7 @@ index f763775..25e1749 100644
  
      // Success - reset retry counter
      sdcard.operationRetries = 0;
-@@ -575,14 +607,6 @@ static bool sdcardSdio_readBlock(uint32_t blockIndex, uint8_t *buffer, sdcard_op
+@@ -575,14 +615,6 @@ static bool sdcardSdio_readBlock(uint32_t blockIndex, uint8_t *buffer, sdcard_op
          // Max retries exceeded, reset card
          sdcard.operationRetries = 0;
          sdcardSdio_reset();
@@ -1041,10 +1386,10 @@ index f763775..25e1749 100644
      }
  }
 diff --git a/src/main/drivers/sdcard/sdmmc_sdio.h b/src/main/drivers/sdcard/sdmmc_sdio.h
-index 4c4e60c..d745ffd 100644
+index 4c4e60c..bd50533 100644
 --- a/src/main/drivers/sdcard/sdmmc_sdio.h
 +++ b/src/main/drivers/sdcard/sdmmc_sdio.h
-@@ -211,6 +211,48 @@ void             SD_Initialize_LL            (DMA_t dma);
+@@ -211,8 +211,53 @@ void             SD_Initialize_LL            (DMA_t dma);
  bool             SD_Initialize_LL            (DMA_t dma);
  #endif
  bool SD_Init(void);
@@ -1092,12 +1437,17 @@ index 4c4e60c..d745ffd 100644
 +#endif
  bool SD_IsDetected(void);
  bool SD_GetState(void);
++#ifdef USE_MYBOX_SDMMC_RECOVERY
++void SD_Disable(void);
++#endif
+ 
+ SD_Error_t SD_GetCardInfo(void);
  
 diff --git a/src/main/drivers/sdcard/sdmmc_sdio_hal.c b/src/main/drivers/sdcard/sdmmc_sdio_hal.c
-index 23b9c34..91cf543 100644
+index 23b9c34..71492d3 100644
 --- a/src/main/drivers/sdcard/sdmmc_sdio_hal.c
 +++ b/src/main/drivers/sdcard/sdmmc_sdio_hal.c
-@@ -59,6 +59,28 @@ static SD_Handle_t SD_Handle;
+@@ -59,6 +59,30 @@ static SD_Handle_t SD_Handle;
  static DMA_HandleTypeDef sd_dma;
  static SD_HandleTypeDef hsd;
  
@@ -1106,6 +1456,8 @@ index 23b9c34..91cf543 100644
 +static volatile bool sdTransferFailed;
 +static bool sdStartupProbeDone;
 +static uint32_t sdTransferSector;
++static bool sdStatusPending;
++static timeUs_t sdStatusStartedAt;
 +
 +sdmmcDiagnostics_t SD_GetDiagnostics(void)
 +{
@@ -1126,7 +1478,7 @@ index 23b9c34..91cf543 100644
  typedef struct sdioPin_s {
      ioTag_t pin;
      uint8_t af;
-@@ -167,6 +189,101 @@ static const sdioHardware_t sdioPinHardware[SDIODEV_COUNT] = {
+@@ -167,6 +191,101 @@ static const sdioHardware_t sdioPinHardware[SDIODEV_COUNT] = {
  static const sdioHardware_t *sdioHardware;
  static sdioPin_t sdioPin[SDIO_PIN_COUNT];
  
@@ -1228,19 +1580,75 @@ index 23b9c34..91cf543 100644
  void sdioPinConfigure(void)
  {
      if (SDCARD_SDIO_DEVICE == SDIOINVALID) {
-@@ -318,18 +435,37 @@ bool SD_Initialize_LL(DMA_t dma)
- bool SD_GetState(void)
- {
-     HAL_SD_CardStateTypedef cardState = HAL_SD_GetCardState(&hsd);
+@@ -315,21 +434,91 @@ bool SD_Initialize_LL(DMA_t dma)
+     return true;
+ }
+ 
+-bool SD_GetState(void)
 +#ifdef USE_MYBOX_SDMMC_RECOVERY
-+    sdDiagnostics.cardState = cardState;
-+    sdDiagnostics.cardResponse = hsd.Instance->RESP1;
-+    if (cardState == 0) {
-+        sdDiagnostics.cardError = HAL_SD_GetError(&hsd);
++void SD_Disable(void)
+ {
+-    HAL_SD_CardStateTypedef cardState = HAL_SD_GetCardState(&hsd);
++    HAL_NVIC_DisableIRQ(sdioHardware->irqn);
++    if (hsd.Instance) {
++        hsd.Instance->MASK = 0;
++        hsd.Instance->IDMACTRL = 0;
++        hsd.Instance->DCTRL = 0;
++        __DSB();
 +    }
++    HAL_NVIC_ClearPendingIRQ(sdioHardware->irqn);
++    SD_Handle.RXCplt = SD_Handle.TXCplt = 0;
++    sdTransferFailed = true;
++    sdStatusPending = false;
++}
 +#endif
  
-     return (cardState == HAL_SD_CARD_TRANSFER);
+-    return (cardState == HAL_SD_CARD_TRANSFER);
++bool SD_GetState(void)
++{
++#ifdef USE_MYBOX_SDMMC_RECOVERY
++    if (sdTransferFailed || !hsd.Instance) {
++        return false;
++    }
++    if (!sdStatusPending) {
++        // Launch CMD13 and return. Never wait for a card response in the PID callbacks.
++        __HAL_SD_CLEAR_FLAG(&hsd, SDMMC_STATIC_CMD_FLAGS);
++        SDMMC_CmdInitTypeDef command = {
++            .Argument = (uint32_t)hsd.SdCard.RelCardAdd << 16,
++            .CmdIndex = SDMMC_CMD_SEND_STATUS,
++            .Response = SDMMC_RESPONSE_SHORT,
++            .WaitForInterrupt = SDMMC_WAIT_NO,
++            .CPSM = SDMMC_CPSM_ENABLE,
++        };
++        sdStatusStartedAt = micros();
++        sdStatusPending = true;
++        SDMMC_SendCommand(hsd.Instance, &command);
++        return false;
++    }
++    const uint32_t status = hsd.Instance->STA;
++    if ((status & (SDMMC_FLAG_CTIMEOUT | SDMMC_FLAG_CCRCFAIL)) ||
++        (micros() - sdStatusStartedAt > 2000U)) {
++        sdCaptureFailure("CMD13 response timeout/error", HAL_SD_ERROR_TIMEOUT, status);
++        SD_Disable();
++        return false;
++    }
++    if ((status & SDMMC_FLAG_CMDACT) || !(status & SDMMC_FLAG_CMDREND)) {
++        return false;
++    }
++    sdStatusPending = false;
++    sdDiagnostics.cardResponse = hsd.Instance->RESP1;
++    sdDiagnostics.cardState = (sdDiagnostics.cardResponse >> 9) & 0x0f;
++    const bool validResponse = (hsd.Instance->RESPCMD & SDMMC_RESPCMD_RESPCMD) == SDMMC_CMD_SEND_STATUS;
++    __HAL_SD_CLEAR_FLAG(&hsd, SDMMC_STATIC_CMD_FLAGS);
++    if (!validResponse || (sdDiagnostics.cardResponse & SDMMC_OCR_ERRORBITS)) {
++        sdCaptureFailure("CMD13 invalid response", HAL_SD_ERROR_GENERAL_UNKNOWN_ERR, status);
++        SD_Disable();
++        return false;
++    }
++    return sdDiagnostics.cardState == HAL_SD_CARD_TRANSFER;
++#else
++    return HAL_SD_GetCardState(&hsd) == HAL_SD_CARD_TRANSFER;
++#endif
  }
  
 -bool SD_Init(void)
@@ -1255,6 +1663,7 @@ index 23b9c34..91cf543 100644
 +    sdTransferFailed = false;
 +    ++sdDiagnostics.attempts;
 +#endif
++    sdStatusPending = false;
      memset(&hsd, 0, sizeof(hsd));
  
      hsd.Instance = sdioHardware->instance;
@@ -1268,7 +1677,7 @@ index 23b9c34..91cf543 100644
  
      // drastically increases the time to respond from the sdcard
      // lets leave it off
-@@ -339,22 +475,38 @@ bool SD_Init(void)
+@@ -339,22 +528,38 @@ bool SD_Init(void)
  #endif
      hsd.Init.BusWide = SDMMC_BUS_WIDE_1B;
      hsd.Init.HardwareFlowControl = SDMMC_HARDWARE_FLOW_CONTROL_ENABLE;
@@ -1314,7 +1723,7 @@ index 23b9c34..91cf543 100644
      switch(hsd.SdCard.CardType) {
      case CARD_SDSC:
          switch (hsd.SdCard.CardVersion) {
-@@ -365,7 +517,10 @@ bool SD_Init(void)
+@@ -365,7 +570,10 @@ bool SD_Init(void)
              SD_CardType = SD_STD_CAPACITY_V2_0;
              break;
          default:
@@ -1326,7 +1735,7 @@ index 23b9c34..91cf543 100644
          }
          break;
  
-@@ -374,7 +529,10 @@ bool SD_Init(void)
+@@ -374,7 +582,10 @@ bool SD_Init(void)
          break;
  
      default:
@@ -1338,7 +1747,7 @@ index 23b9c34..91cf543 100644
      }
  
      // STATIC_ASSERT(sizeof(SD_Handle.CSD) == sizeof(hsd.CSD), hal-csd-size-error);
-@@ -383,7 +541,56 @@ bool SD_Init(void)
+@@ -383,7 +594,56 @@ bool SD_Init(void)
      // STATIC_ASSERT(sizeof(SD_Handle.CID) == sizeof(hsd.CID), hal-cid-size-error);
      memcpy(&SD_Handle.CID, &hsd.CID, sizeof(SD_Handle.CID));
  
@@ -1396,7 +1805,7 @@ index 23b9c34..91cf543 100644
  }
  
  SD_Error_t SD_GetCardInfo(void)
-@@ -588,11 +795,27 @@ SD_Error_t SD_GetCardInfo(void)
+@@ -588,20 +848,40 @@ SD_Error_t SD_GetCardInfo(void)
  }
  
  SD_Error_t SD_CheckWrite(void) {
@@ -1424,16 +1833,22 @@ index 23b9c34..91cf543 100644
      if (SD_Handle.RXCplt != 0) return SD_BUSY;
      return SD_OK;
  }
-@@ -600,8 +823,6 @@ SD_Error_t SD_CheckRead(void) {
+ 
  SD_Error_t SD_WriteBlocks_DMA(uint64_t WriteAddress, uint32_t *buffer, uint32_t BlockSize, uint32_t NumberOfBlocks)
  {
-     SD_Error_t ErrorState = SD_OK;
+-    SD_Error_t ErrorState = SD_OK;
 -    SD_Handle.TXCplt = 1;
--
++#ifdef USE_MYBOX_SDMMC_RECOVERY
++    if (NumberOfBlocks != 1 || sdTransferFailed) {
++        return SD_ERROR;
++    }
++#endif
+ 
++    SD_Error_t ErrorState = SD_OK;
      if (BlockSize != 512) {
          return SD_ERROR; // unsupported.
      }
-@@ -623,9 +844,20 @@ SD_Error_t SD_WriteBlocks_DMA(uint64_t WriteAddress, uint32_t *buffer, uint32_t
+@@ -623,9 +903,20 @@ SD_Error_t SD_WriteBlocks_DMA(uint64_t WriteAddress, uint32_t *buffer, uint32_t
          }
      }
  #endif
@@ -1454,7 +1869,20 @@ index 23b9c34..91cf543 100644
  
      return ErrorState;
  }
-@@ -652,8 +884,6 @@ SD_Error_t SD_ReadBlocks_DMA(uint64_t ReadAddress, uint32_t *buffer, uint32_t Bl
+@@ -640,6 +931,12 @@ static volatile sdReadParameters_t sdReadParameters;
+ 
+ SD_Error_t SD_ReadBlocks_DMA(uint64_t ReadAddress, uint32_t *buffer, uint32_t BlockSize, uint32_t NumberOfBlocks)
+ {
++#ifdef USE_MYBOX_SDMMC_RECOVERY
++    if (NumberOfBlocks != 1 || sdTransferFailed) {
++        return SD_ERROR;
++    }
++#endif
++
+     SD_Error_t ErrorState = SD_OK;
+ 
+     if (BlockSize != 512) {
+@@ -652,8 +949,6 @@ SD_Error_t SD_ReadBlocks_DMA(uint64_t ReadAddress, uint32_t *buffer, uint32_t Bl
      }
  #endif
  
@@ -1463,7 +1891,7 @@ index 23b9c34..91cf543 100644
      sdReadParameters.buffer = buffer;
      sdReadParameters.BlockSize = BlockSize;
      sdReadParameters.NumberOfBlocks = NumberOfBlocks;
-@@ -666,9 +896,21 @@ SD_Error_t SD_ReadBlocks_DMA(uint64_t ReadAddress, uint32_t *buffer, uint32_t Bl
+@@ -666,9 +961,21 @@ SD_Error_t SD_ReadBlocks_DMA(uint64_t ReadAddress, uint32_t *buffer, uint32_t Bl
          }
      }
  #endif
@@ -1485,7 +1913,7 @@ index 23b9c34..91cf543 100644
  
      return ErrorState;
  }
-@@ -707,6 +949,14 @@ void HAL_SD_RxCpltCallback(SD_HandleTypeDef *hsd)
+@@ -707,6 +1014,14 @@ void HAL_SD_RxCpltCallback(SD_HandleTypeDef *hsd)
      SD_Handle.RXCplt = 0;
  }
  
@@ -1500,7 +1928,7 @@ index 23b9c34..91cf543 100644
  void HAL_SD_AbortCallback(SD_HandleTypeDef *hsd)
  {
      UNUSED(hsd);
-@@ -717,12 +967,20 @@ void HAL_SD_AbortCallback(SD_HandleTypeDef *hsd)
+@@ -717,12 +1032,20 @@ void HAL_SD_AbortCallback(SD_HandleTypeDef *hsd)
  
  void SDMMC1_IRQHandler(void)
  {
@@ -1669,6 +2097,20 @@ index 9ba5a8e..f3f211e 100644
      systemState |= SYSTEM_STATE_SENSORS_READY;
  
      flashLedsAndBeep();
+diff --git a/src/main/fc/fc_msp.c b/src/main/fc/fc_msp.c
+index 8ac4b36..b274467 100644
+--- a/src/main/fc/fc_msp.c
++++ b/src/main/fc/fc_msp.c
+@@ -3219,6 +3219,9 @@ static mspResult_e mspFcProcessInCommand(uint16_t cmdMSP, sbuf_t *src)
+ 
+ 
+     case MSP_OSD_CHAR_WRITE:
++        if (ARMING_FLAG(ARMED)) {
++            return MSP_RESULT_ERROR;
++        }
+         if (dataSize >= 55) {
+             osdCharacter_t chr;
+             size_t osdCharacterBytes;
 diff --git a/src/main/fc/fc_tasks.c b/src/main/fc/fc_tasks.c
 index 31143e9..c91b771 100755
 --- a/src/main/fc/fc_tasks.c
@@ -2053,6 +2495,160 @@ index cfa7da7..a66a9fc 100644
  
  #ifdef AFATFS_USE_FREEFILE
          case AFATFS_INITIALIZATION_FREEFILE_CREATE:
+diff --git a/src/main/io/gps_dronecan.c b/src/main/io/gps_dronecan.c
+index 2c689d8..0938da6 100644
+--- a/src/main/io/gps_dronecan.c
++++ b/src/main/io/gps_dronecan.c
+@@ -79,8 +79,65 @@ static uint8_t gpsMapFixType(uint8_t dronecanFixType)
+     return GPS_NO_FIX;
+ }
+ 
++static void dronecanGpsNoFix(void)
++{
++    gpsSolDRV.fixType = GPS_NO_FIX;
++    gpsSolDRV.flags.validVelNE = false;
++    gpsSolDRV.flags.validVelD = false;
++    gpsSolDRV.flags.validEPE = false;
++    gpsProcessNewDriverData();
++    newDataReady = true;
++}
++
++static bool dronecanGpsFixValid(uint8_t status, int64_t latitude, int64_t longitude,
++    int32_t altitudeMm, const float velocity[3])
++{
++    if (status > 3 || latitude < -9000000000LL || latitude > 9000000000LL ||
++        longitude < -18000000000LL || longitude > 18000000000LL ||
++        altitudeMm < -100000000 || altitudeMm > 100000000) {
++        return false;
++    }
++    // INAV stores cm/s in int16_t, including horizontal vector length.
++    for (unsigned axis = 0; axis < 3; axis++) {
++        if (!isfinite(velocity[axis]) || fabsf(velocity[axis]) > 300.0f) {
++            return false;
++        }
++    }
++    return velocity[0] * velocity[0] + velocity[1] * velocity[1] <= 90000.0f;
++}
++
++static uint16_t dronecanGpsDop(float dop)
++{
++    if (!isfinite(dop) || dop <= 0.0f) {
++        return 9999;
++    }
++    return gpsConstrainHDOP((uint32_t)fminf(dop * 100.0f, 9999.0f));
++}
++
++static void dronecanGpsSetCovariance(float varX, float varY, float varZ)
++{
++    gpsSolDRV.flags.validEPE = false;
++    if (!isfinite(varX) || !isfinite(varY) || !isfinite(varZ) ||
++        varX < 0 || varY < 0 || varZ < 0 || varX > 1.0e8f || varY > 1.0e8f || varZ > 1.0e8f) {
++        return;
++    }
++    gpsSolDRV.eph = gpsConstrainEPE((uint32_t)fminf(sqrtf(varX + varY) * 100.0f, 9999.0f));
++    gpsSolDRV.epv = gpsConstrainEPE((uint32_t)fminf(sqrtf(varZ) * 100.0f, 9999.0f));
++    gpsSolDRV.flags.validEPE = true;
++}
++
+ void dronecanGPSReceiveGNSSFix(const struct uavcan_equipment_gnss_Fix * pgnssFix)
+ {
++    if (pgnssFix->status < 2) {
++        dronecanGpsNoFix();
++        return;
++    }
++
++    if (!dronecanGpsFixValid(pgnssFix->status, pgnssFix->latitude_deg_1e8,
++            pgnssFix->longitude_deg_1e8, pgnssFix->height_msl_mm, pgnssFix->ned_velocity)) {
++        return;
++    }
++
+     gpsSolDRV.fixType   = gpsMapFixType(pgnssFix->status);
+     gpsSolDRV.numSat    = pgnssFix->sats_used;
+     gpsSolDRV.llh.lon   = pgnssFix->longitude_deg_1e8 / 10; // convert to deg_1e7
+@@ -97,22 +154,15 @@ void dronecanGPSReceiveGNSSFix(const struct uavcan_equipment_gnss_Fix * pgnssFix
+     gpsSolDRV.groundCourse = RADIANS_TO_DECIDEGREES(groundCourse);
+     // TODO where to get EPH gpsSolDRV.eph = gpsConstrainEPE(pgnssFix-> / 10);
+     // TODO where to get EPV gpsSolDRV.epv = gpsConstrainEPE(pkt->verticalPosAccuracy / 10);
+-    if(pgnssFix->pdop > 0){
+-        gpsSolDRV.hdop = gpsConstrainHDOP(pgnssFix->pdop * 100);  // Only update if populated
+-    } else if((9999 > lastHDOP) && (lastHDOP> 0)) {
++    gpsSolDRV.hdop = dronecanGpsDop(pgnssFix->pdop);
++    if (gpsSolDRV.hdop == 9999 && lastHDOP > 0 && lastHDOP < 9999) {
+         gpsSolDRV.hdop = lastHDOP;
+     }
+     gpsSolDRV.flags.validVelNE = true;
+     gpsSolDRV.flags.validVelD = true;
+     gpsSolDRV.flags.validEPE = false;  // assume invalid unless the covariance is filled in.
+     if (pgnssFix->position_covariance.len >= 6) {
+-        float var_x = pgnssFix->position_covariance.data[0];  // meters²
+-        float var_y = pgnssFix->position_covariance.data[2];  // meters²
+-        float var_z = pgnssFix->position_covariance.data[5];  // meters²
+-
+-        gpsSolDRV.eph = gpsConstrainEPE((uint32_t)(sqrtf(var_x + var_y) * 100));  // cm
+-        gpsSolDRV.epv = gpsConstrainEPE((uint32_t)(sqrtf(var_z) * 100));          // cm
+-        gpsSolDRV.flags.validEPE = true;
++        dronecanGpsSetCovariance(pgnssFix->position_covariance.data[0], pgnssFix->position_covariance.data[2], pgnssFix->position_covariance.data[5]);
+     } 
+ 
+     // gpsSolDRV.time.year   = pkt->year;
+@@ -131,6 +181,16 @@ void dronecanGPSReceiveGNSSFix(const struct uavcan_equipment_gnss_Fix * pgnssFix
+ 
+ void dronecanGPSReceiveGNSSFix2(const struct uavcan_equipment_gnss_Fix2 * pgnssFix2)
+ {
++    if (pgnssFix2->status < 2) {
++        dronecanGpsNoFix();
++        return;
++    }
++
++    if (!dronecanGpsFixValid(pgnssFix2->status, pgnssFix2->latitude_deg_1e8,
++            pgnssFix2->longitude_deg_1e8, pgnssFix2->height_msl_mm, pgnssFix2->ned_velocity)) {
++        return;
++    }
++
+     gpsSolDRV.fixType   = gpsMapFixType(pgnssFix2->status);
+     gpsSolDRV.numSat    = pgnssFix2->sats_used;
+     gpsSolDRV.llh.lon   = pgnssFix2->longitude_deg_1e8 / 10; // convert to deg_1e7
+@@ -147,22 +207,15 @@ void dronecanGPSReceiveGNSSFix2(const struct uavcan_equipment_gnss_Fix2 * pgnssF
+     gpsSolDRV.groundCourse = RADIANS_TO_DECIDEGREES(groundCourse);
+     // TODO where to get EPH gpsSolDRV.eph = gpsConstrainEPE(pgnssFix-> / 10);
+     // TODO where to get EPV gpsSolDRV.epv = gpsConstrainEPE(pkt->verticalPosAccuracy / 10);
+-    if (pgnssFix2->pdop > 0){
+-        gpsSolDRV.hdop = gpsConstrainHDOP(pgnssFix2->pdop * 100); // Only update if valid.
+-    } else if((9999 > lastHDOP) && (lastHDOP > 0)) {
++    gpsSolDRV.hdop = dronecanGpsDop(pgnssFix2->pdop);
++    if (gpsSolDRV.hdop == 9999 && lastHDOP > 0 && lastHDOP < 9999) {
+         gpsSolDRV.hdop = lastHDOP;
+     }
+     gpsSolDRV.flags.validVelNE = true;
+     gpsSolDRV.flags.validVelD = true;
+     gpsSolDRV.flags.validEPE = false;  // assume invalid unless the covariance is filled in.
+     if (pgnssFix2->covariance.len >= 6) {
+-        float var_x = pgnssFix2->covariance.data[0];  // meters²
+-        float var_y = pgnssFix2->covariance.data[2];  // meters²
+-        float var_z = pgnssFix2->covariance.data[5];  // meters²
+-
+-        gpsSolDRV.eph = gpsConstrainEPE((uint32_t)(sqrtf(var_x + var_y) * 100));  // cm
+-        gpsSolDRV.epv = gpsConstrainEPE((uint32_t)(sqrtf(var_z) * 100));          // cm
+-        gpsSolDRV.flags.validEPE = true;
++        dronecanGpsSetCovariance(pgnssFix2->covariance.data[0], pgnssFix2->covariance.data[2], pgnssFix2->covariance.data[5]);
+     } 
+     // gpsSolDRV.time.year   = pkt->year;
+     // gpsSolDRV.time.month  = pkt->month;
+@@ -180,10 +233,7 @@ void dronecanGPSReceiveGNSSFix2(const struct uavcan_equipment_gnss_Fix2 * pgnssF
+ 
+ void dronecanGPSReceiveGNSSAuxiliary(const struct uavcan_equipment_gnss_Auxiliary * pgnssAux)
+ {
+-    // DroneCAN float16 optional fields encode NaN when unpopulated; guard before use.
+-    // gpsConstrainHDOP clamps to 9999 preventing uint16_t overflow for extreme DOP values.
+-    if (!isnan(pgnssAux->hdop)) {
+-        lastHDOP = gpsConstrainHDOP((uint32_t)(pgnssAux->hdop * 100));
+-    }
++    // NaN means unknown. Never cast an unknown/negative/infinite DOP to an integer.
++    lastHDOP = dronecanGpsDop(pgnssAux->hdop);
+ }
+-#endif
+\ No newline at end of file
++#endif
 diff --git a/src/main/rx/sbus.c b/src/main/rx/sbus.c
 index f08267e..d951ad3 100644
 --- a/src/main/rx/sbus.c

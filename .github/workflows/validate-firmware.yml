@@ -51,6 +51,9 @@ jobs:
       - name: Test DroneCAN compass payloads and CAN pin selection
         run: python3 tools/check_dronecan.py upstream
 
+      - name: Test bounded I/O and preserved flight behavior
+        run: python3 tools/check_flight_guards.py upstream
+
       - name: Test SD filesystem mount and log persistence
         run: python3 tools/check_sd_filesystem.py upstream
 

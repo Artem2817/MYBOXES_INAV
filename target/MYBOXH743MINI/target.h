@@ -14,6 +14,7 @@
 #error Unknown MYBOX H743 Mini target
 #endif
 
+#define USE_MYBOX_IO_TIMEOUTS
 #define USE_TARGET_CONFIG
 #define USE_DSHOT
 #define USE_ESC_SENSOR

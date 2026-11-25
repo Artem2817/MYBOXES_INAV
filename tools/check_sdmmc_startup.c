@@ -4,6 +4,7 @@
 #include <stdint.h>
 #include <string.h>
 
+typedef uint64_t timeUs_t;
 #define USE_MYBOX_SDMMC_RECOVERY
 #define MYBOXH743MINI
 #define USE_SD_TRANSCEIVER 0

@@ -75,6 +75,7 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--checkout", type=Path, required=True)
     parser.add_argument("--output", type=Path, required=True)
+    parser.add_argument("--build-dir", type=Path, help="Separate clean build directory")
     parser.add_argument("--revision", type=int, default=1)
     args = parser.parse_args()
     if args.revision < 1:
@@ -88,7 +89,7 @@ def main():
     for board, (target, identifier, board_name) in BOARDS.items():
         tag = f"myboxh743-{board}-{version}-r{args.revision}-dev"
         filename = f"inav_{version}_{target}.hex"
-        source = args.checkout / "build-mybox" / filename
+        source = (args.build_dir or args.checkout / "build-mybox") / filename
         content = source.read_bytes()
         try:
             image_size = verify_hex(content, identifier)
