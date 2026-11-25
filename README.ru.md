@@ -22,7 +22,7 @@
 cd /home/osas/inav/mybox
 git switch inav-9
 git pull --ff-only
-bash build.sh /home/osas/inav
+bash build.sh /home/osas/inav-9-failover
 ```
 
 Нужны git, cmake, make, gcc, g++, ruby и python3. При отсутствии ARM GCC сборщик INAV загрузит рекомендованный toolchain.
@@ -68,3 +68,5 @@ save
 ### Телеметрия ESC
 
 Для всех трёх плат включён `USE_ESC_SENSOR`. Для RPM подключите совместимый выход телеметрии ESC к RX свободного UART и общий GND. В Ports → Peripherals выберите ESC output/telemetry для этого UART. При управлении DShot оставьте `esc_sensor_listen_only = OFF`; задайте `motor_poles` по числу магнитных полюсов мотора. Двунаправленный DShot не используется. Команды `feature ESC_SENSOR` в INAV нет.
+
+[Автоматическое резервирование IMU на Mini v2 Vib](IMU-FAILOVER.ru.md).

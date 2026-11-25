@@ -39,14 +39,14 @@ else
     cp -R -- "$overlay_dir/target/MYBOXH743MINI" "$target_dir"
 fi
 
-for patch in "$overlay_dir/spa06-003.patch" "$overlay_dir/i2c4-pb9.patch" "$overlay_dir/vib-sensors.patch" "$overlay_dir/dshot-motor-init.patch" "$overlay_dir/sd-card-init.patch"; do
+for patch in "$overlay_dir/board-support.patch"; do
     if ! git -C "$checkout" apply --reverse --check "$patch" 2>/dev/null; then
         git -C "$checkout" apply "$patch"
     fi
 done
 
-build_dir="$checkout/build-mybox"
-cmake -S "$checkout" -B "$build_dir" -G 'Unix Makefiles' -DCMAKE_BUILD_TYPE=Release
+build_dir="${BUILD_DIR:-$checkout/build-mybox}"
+cmake -S "$checkout" -B "$build_dir" -G 'Unix Makefiles' -DCMAKE_BUILD_TYPE=Release -DWARNINGS_AS_ERRORS=ON
 cmake --build "$build_dir" --parallel "${JOBS:-4}" \
     --target MYBOXH743MINI MYBOXH743MINIV2 MYBOXH743MINIV2VIB_BENCH
 

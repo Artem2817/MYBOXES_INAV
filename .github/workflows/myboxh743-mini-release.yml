@@ -7,7 +7,7 @@ on:
       revision:
         description: "Positive MYBOXES release revision. These images are bench prereleases."
         required: true
-        default: "16"
+        default: "17"
         type: string
 
 permissions:

@@ -13,6 +13,10 @@
 #include "drivers/timer.h"
 #include "fc/settings.h"
 #include "sensors/gyro.h"
+#ifdef USE_MYBOX_VIB
+#include "sensors/acceleration.h"
+#include "mybox_imu_failover.h"
+#endif
 
 PG_REGISTER_WITH_RESET_TEMPLATE(myboxSensorConfig_t, myboxSensorConfig, PG_MYBOX_SENSOR_CONFIG, 0);
 PG_RESET_TEMPLATE(myboxSensorConfig_t, myboxSensorConfig,
@@ -44,6 +48,7 @@ static accDev_t standbyAcc;
 static bool standbyPresent;
 #endif
 
+#ifndef USE_MYBOX_VIB
 static bool myboxImuResponds(uint8_t index)
 {
     const bool module = index == 1;
@@ -52,6 +57,8 @@ static bool myboxImuResponds(uint8_t index)
     return device && busRead(device, module ? ICM42670_ID_REGISTER : ICM45686_ID_REGISTER, &id)
         && id == (module ? ICM42670_ID : ICM45686_ID);
 }
+
+#endif
 
 void myboxSensorsInit(void)
 {
@@ -70,6 +77,9 @@ void myboxSensorsInit(void)
             standbyAcc.initFn(&standbyAcc);
         }
     }
+#endif
+#ifdef USE_MYBOX_VIB
+    myboxImuAttach(myboxActiveGyroDevice(), &acc.dev, &standbyGyro, &standbyAcc, standbyPresent);
 #endif
     TCH_t *heater = timerGetTCH(&heaterHardware);
     if (heater) {
@@ -96,18 +106,16 @@ void myboxSensorsUpdate(void)
     if (activeImu >= 2) {
         return;
     }
-    imuValid[activeImu] = myboxImuResponds(activeImu) && gyroReadTemperature();
-    if (imuValid[activeImu]) {
-        imuTemperature[activeImu] = gyroGetTemperature();
-    }
-
 #ifdef USE_MYBOX_VIB
-    const uint8_t standbyImu = 1 - activeImu;
-    imuValid[standbyImu] = standbyPresent && myboxImuResponds(standbyImu)
-        && standbyGyro.readFn(&standbyGyro) && standbyAcc.readFn(&standbyAcc)
-        && standbyGyro.temperatureFn(&standbyGyro, &imuTemperature[standbyImu]);
+    activeImu = myboxActiveImuIndex();
+    imuValid[activeImu] = gyroReadTemperature();
+    if (imuValid[activeImu]) imuTemperature[activeImu] = gyroGetTemperature();
+    const uint8_t otherImu = 1U - activeImu;
+    imuValid[otherImu] = myboxImuTemperature(otherImu, &imuTemperature[otherImu]);
     const uint8_t heatedImu = 1;
 #else
+    imuValid[activeImu] = myboxImuResponds(activeImu) && gyroReadTemperature();
+    if (imuValid[activeImu]) imuTemperature[activeImu] = gyroGetTemperature();
     const uint8_t heatedImu = 0;
 #endif
 
