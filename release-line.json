@@ -1,0 +1,7 @@
+{
+  "branch": "inav-10",
+  "inav_major": 10,
+  "upstream_tag": "10.0.0-rc2",
+  "upstream_commit": "f1cd5c6f68838227ee4d23e97a44c017849cbb14",
+  "configurator": "10.0"
+}

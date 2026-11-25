@@ -5,9 +5,10 @@ import argparse
 from hashlib import sha256
 import json
 from pathlib import Path
-import re
 import shutil
 import subprocess
+
+from release_line import check_checkout, load_line
 
 
 BOARDS = {
@@ -78,12 +79,10 @@ def main():
     args = parser.parse_args()
     if args.revision < 1:
         parser.error("--revision must be positive")
-    version = git_revision(args.checkout, "describe", "--tags", "--exact-match", "HEAD")
-    upstream_release = version
-    if not re.fullmatch(r"[0-9]+\.[0-9]+\.[0-9]+(?:-rc[1-9][0-9]*)?", upstream_release):
-        parser.error(f"Invalid upstream version: {version}")
+    line = load_line()
+    source_commit = check_checkout(line, args.checkout)
+    upstream_release = line["upstream_tag"]
     version = upstream_release.split("-", 1)[0]
-    source_commit = git_revision(args.checkout, "rev-parse", "HEAD")
     project_commit = git_revision(Path(__file__).resolve().parents[1], "rev-parse", "HEAD")
 
     for board, (target, identifier, board_name) in BOARDS.items():
@@ -103,6 +102,7 @@ def main():
             "schema": 1, "firmware": "inav", "release": tag, "channel": "dev",
             "board": board, "board_name": board_name, "target": target,
             "board_identifier": identifier, "version": version, "revision": args.revision,
+            "source_branch": line["branch"], "inav_major": line["inav_major"],
             "upstream_release": upstream_release, "upstream_commit": source_commit, "git_commit": project_commit,
             "bench_only": True, "image_size": image_size,
             "files": [{"name": filename, "size": len(content), "sha256": checksum}],
