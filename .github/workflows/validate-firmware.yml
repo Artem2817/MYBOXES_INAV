@@ -54,6 +54,9 @@ jobs:
       - name: Test bounded I/O and preserved flight behavior
         run: python3 tools/check_flight_guards.py upstream
 
+      - name: Test Mini v2 Vib IMU failover
+        run: python3 tools/check_imu_failover.py upstream
+
       - name: Test SD filesystem mount and log persistence
         run: python3 tools/check_sd_filesystem.py upstream
 

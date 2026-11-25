@@ -1,10 +1,7 @@
 {
   "src/main/main.c": "ce046489f99433d2c63831d5d47e27776b04e0abda77cd3c12f02bf10697f020",
   "src/main/drivers/system_stm32h7xx.c": "ac1b3624a7764b2d8f59a13032f0953b1012059d2c62c40de090a3beab5adc62",
-  "src/main/sensors/gyro.c": "bd3525946cb0185f8dc9c2fc5e2ec310322b74d3c3d1c7c8c352449c3b322658",
-  "src/main/sensors/acceleration.c": "ab3dbf3eb3fbfa78dfde3df4acff70c8ed08fe924c5f6c063f7c3b71485573f5",
   "src/main/sensors/barometer.c": "ddaf332dbc49356265f8cd32421dc8242432ccbf3ecb4fea93f1f065187a4735",
-  "src/main/sensors/diagnostics.c": "8f8bcbb4ab0960de26fe69259350e0512f61e0d42f08be5cbf60d6305f7711a5",
   "src/main/fc/fc_core.c": "a7bfddf67c574de7a8ee6bec93ce623ef0663309619f9a1c6c69f3e6909f378a",
   "src/main/flight/pid.c": "39dad05445f7c94cf7b747cbb9be5b0a4a526ddefcffe28cd67d4d21cca2cb12",
   "src/main/flight/mixer.c": "db46683ebdf3a23e20754aa27306cfbaf88c8c48f1ca49a6cc2d409b67d14a73",
