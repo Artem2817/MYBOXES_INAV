@@ -16,7 +16,33 @@ permissions:
   contents: read
 
 jobs:
+  checks:
+    name: Check release metadata
+    runs-on: ubuntu-24.04
+    outputs:
+      firmware_changed: ${{ steps.scope.outputs.build }}
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Check selected line and package rules
+        env:
+          SOURCE_BRANCH: ${{ github.base_ref || github.ref_name }}
+        run: |
+          python3 tools/release_line.py --ref "$SOURCE_BRANCH"
+          python3 -m unittest discover -s tools -p 'test_*.py'
+          bash -n build.sh
+      - name: Choose validation scope
+        id: scope
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          BASE_COMMIT: ${{ github.event.pull_request.base.sha }}
+          BEFORE_COMMIT: ${{ github.event.before }}
+        run: python3 tools/ci_scope.py
   build:
+    needs: checks
+    if: needs.checks.outputs.firmware_changed == 'true'
     name: Build and verify Mini, Mini v2 and Mini v2 Vib
     runs-on: ubuntu-24.04
     timeout-minutes: 30
@@ -75,3 +101,18 @@ jobs:
           path: dist/
           if-no-files-found: error
           retention-days: 14
+
+
+  result:
+    name: INAV project checks
+    if: always()
+    needs: [checks, build]
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Require successful checks and applicable firmware validation
+        env:
+          QUICK: ${{ needs.checks.result }}
+          FIRMWARE: ${{ needs.build.result }}
+        run: |
+          test "$QUICK" = success
+          test "$FIRMWARE" = success -o "$FIRMWARE" = skipped

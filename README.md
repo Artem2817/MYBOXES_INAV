@@ -1,26 +1,24 @@
 # MYBOXES INAV 9
 
-Рабочая ветка **inav-9** для MYBOX H743 Mini, Mini v2 и Mini v2 Vib.
-Основа: **INAV 9.1.0**, INAV Configurator **9.1**.
-Текущий опубликованный выпуск: **r15 / INAV 9.1.0 / Stable**.
+Рабочая линия **inav-9**, основа **9.1.0**, Configurator **9.1**.
 
-| Линия | Для чего | Каталог в нашей WSL |
-|---|---|---|
-| [inav-9](https://github.com/Artem2817/MYBOXES_INAV/tree/inav-9) | Поддержка проверенной INAV 9, основа r15 Stable | ~/inav/mybox |
-| [inav-10](https://github.com/Artem2817/MYBOXES_INAV/tree/inav-10) | INAV 10 и DroneCAN, основа r16 Dev | ~/inav-10/mybox |
+| Плата | INAV 9.1 Stable | INAV 9.1 Dev | INAV 10 Dev |
+|---|---|---|---|
+| Mini | r15 | r15 | r17 |
+| Mini v2 | r15 | r15 | r17 |
+| Mini v2 Vib | r15 | r16 | r18 |
 
-- [Скачать прошивки](https://artem2817.github.io/MYBOXES_Ardupilot/?firmware=inav)
-- [Как работать с двумя версиями и выпускать обновления](BRANCHES.ru.md)
-- [Платы, подключение и локальная сборка](README.ru.md)
-- [GitHub Releases](https://github.com/Artem2817/MYBOXES_INAV/releases)
+Новые r16 для INAV 9 и r18 для INAV 10 относятся только к Mini v2 Vib: автоматический переход на резервную IMU включён по умолчанию. Подробнее: [IMU-FAILOVER.ru.md](IMU-FAILOVER.ru.md).
 
-В каждом каталоге уже выбрана своя ветка. Обновляйте её и работайте в том же каталоге.
-Ветка по умолчанию на GitHub — inav-10; main сохранена для совместимости старых ссылок и больше не используется для сборок.
-Проверки выполняются при push и pull request в рабочие ветки. Сборка и упаковка сверяют точный исходный коммит с release-line.json.
-Выпуск запускается через Actions с явно выбранной веткой. Новые сборки получают Dev; существующая r15 Stable остаётся без изменений.
+[Скачать прошивки](https://artem2817.github.io/MYBOXES_Ardupilot/?firmware=inav&line=9) · [Релизы](https://github.com/Artem2817/MYBOXES_INAV/releases)
 
-Здесь сохранены определения плат, драйверы, SD, DShot, ESC-телеметрия и поворот IMU из r15. Поддержка DroneCAN GPS/компаса добавлена в линии INAV 10. Переименование ветки не меняет уже выпущенный HEX.
+- [Подключение, параметры и сборка](README.ru.md)
+- [Работа с ветками и выпуск обновления](BRANCHES.ru.md)
+- [Текущие планы](ROADMAP.ru.md)
+- [MyboxDiag](https://github.com/Artem2817/MYBOXES_Diag)
 
-- [Запланированные доработки: автоматический резерв IMU только для v2 Vib](ROADMAP.ru.md)
+Источник истины — файлы этой ветки: target/, board-support.patch, release-line.json и tools/. Полные исходники закреплены точным коммитом из release-line.json. Исторические дополнительные патчи находятся в archive/legacy-patches/ и не участвуют в текущей сборке.
 
-[Mini v2 Vib r16: автоматическое переключение на резервную IMU](IMU-FAILOVER.ru.md). Включено по умолчанию.
+В WSL проект находится в /home/osas/inav/mybox; полные исходники — /home/osas/inav-9-failover. Отдельные диагностические checkout не заменяют релизные исходники. Ветка main заморожена для старых ссылок.
+
+Разработка ведётся от Artem2817 с помощью AI. Опубликованные HEX и теги сохраняются без изменений; новые исправления получают новый выпуск.
