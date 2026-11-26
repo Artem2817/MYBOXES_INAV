@@ -1,28 +1,26 @@
 # MYBOXES INAV 10
 
-Рабочая ветка **inav-10** для MYBOX H743 Mini, Mini v2 и Mini v2 Vib.
-Основа: **INAV 10.0.0-rc2**, INAV Configurator **10.0**.
-Текущий опубликованный выпуск: **r17 / INAV 10.0.0-rc2 / Dev**.
+Рабочая линия **inav-10**, основа **10.0.0-rc2**, Configurator **10.0**.
 
-| Линия | Для чего | Каталог в нашей WSL |
-|---|---|---|
-| [inav-9](https://github.com/Artem2817/MYBOXES_INAV/tree/inav-9) | Поддержка проверенной INAV 9, основа r15 Stable | ~/inav/mybox |
-| [inav-10](https://github.com/Artem2817/MYBOXES_INAV/tree/inav-10) | INAV 10 и DroneCAN, основа r16 Dev | ~/inav-10/mybox |
+| Плата | INAV 9.1 Stable | INAV 9.1 Dev | INAV 10 Dev |
+|---|---|---|---|
+| Mini | r15 | r15 | r17 |
+| Mini v2 | r15 | r15 | r17 |
+| Mini v2 Vib | r15 | r16 | r18 |
 
-- [Скачать прошивки](https://artem2817.github.io/MYBOXES_Ardupilot/?firmware=inav)
-- [Как работать с двумя версиями и выпускать обновления](BRANCHES.ru.md)
-- [Платы, подключение и локальная сборка](README.ru.md)
-- [GitHub Releases](https://github.com/Artem2817/MYBOXES_INAV/releases)
+Новые r16 для INAV 9 и r18 для INAV 10 относятся только к Mini v2 Vib: автоматический переход на резервную IMU включён по умолчанию. Подробнее: [IMU-FAILOVER.ru.md](IMU-FAILOVER.ru.md).
 
-В каждом каталоге уже выбрана своя ветка. Обновляйте её и работайте в том же каталоге.
-Ветка по умолчанию на GitHub — inav-10; main сохранена для совместимости старых ссылок и больше не используется для сборок.
-Проверки выполняются при push и pull request в рабочие ветки. Сборка и упаковка сверяют точный исходный коммит с release-line.json.
-Выпуск запускается через Actions с явно выбранной веткой. Новые сборки получают Dev; существующая r15 Stable остаётся без изменений.
+[Скачать прошивки](https://artem2817.github.io/MYBOXES_Ardupilot/?firmware=inav&line=10) · [Релизы](https://github.com/Artem2817/MYBOXES_INAV/releases)
 
-[Matek M10Q-3100 и выбор CAN1/CAN2](DRONECAN.ru.md): заводской профиль CAN1, 1000 кбит/с, DNA ON, GPS и компас DroneCAN. Одновременно активен один CAN. INAV 10.0.0-rc2 остаётся предварительной версией.
+- [Подключение, параметры и сборка](README.ru.md)
+- [Работа с ветками и выпуск обновления](BRANCHES.ru.md)
+- [Текущие планы](ROADMAP.ru.md)
+- [MyboxDiag](https://github.com/Artem2817/MYBOXES_Diag)
 
-[r17: исправления ожиданий периферии и проверок данных](RELEASE-r17.ru.md). Штатная полётная логика r16 сохранена.
+Источник истины — файлы этой ветки: target/, board-support.patch, release-line.json и tools/. Полные исходники закреплены точным коммитом из release-line.json. Исторические дополнительные патчи находятся в archive/legacy-patches/ и не участвуют в текущей сборке.
 
-- [Запланированные доработки: автоматический резерв IMU только для v2 Vib](ROADMAP.ru.md)
+В WSL проект находится в /home/osas/inav-10/mybox; полные исходники — /home/osas/inav-10. Отдельные диагностические checkout не заменяют релизные исходники. Ветка main заморожена для старых ссылок.
 
-[Mini v2 Vib r18: автоматическое переключение на резервную IMU](IMU-FAILOVER.ru.md). Включено по умолчанию.
+Разработка ведётся от Artem2817 с помощью AI. Опубликованные HEX и теги сохраняются без изменений; новые исправления получают новый выпуск.
+
+[DroneCAN и Matek M10Q-3100](DRONECAN.ru.md). Заводской профиль: CAN1, 1000 кбит/с, GPS и компас DroneCAN; активна одна выбранная CAN-шина. Основа INAV 10.0.0-rc2 остаётся предварительной версией.
